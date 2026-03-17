@@ -278,8 +278,8 @@
         "Typecheck passes"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "GET uses Network.getCookies with optional urls param. POST uses Network.setCookies with cookie array. DELETE uses Network.clearBrowserCookies (no filter) or Network.getCookies + Network.deleteCookies (with name/domain filter)."
     },
     {
       "id": "US-018",
@@ -295,8 +295,8 @@
         "Typecheck passes"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "BFS crawl uses CDP Page.navigate + Runtime.evaluate for each page. Content extraction supports 4 modes (markdown/html/text/links). URL dedup via fragment-stripped normalization. Domain filtering via url crate. Added url.workspace = true dependency."
     },
     {
       "id": "US-019",
@@ -308,8 +308,8 @@
         "Typecheck passes"
       ],
       "priority": 19,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Types added to existing types.ts (not a new types/browser.ts) following the SDK's established pattern of extracting type aliases from the generated OpenAPI types. Regenerated openapi.json and openapi.ts to include browser operations."
     },
     {
       "id": "US-020",
@@ -323,8 +323,8 @@
         "Typecheck passes"
       ],
       "priority": 20,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Methods follow exact same patterns as desktop counterparts. getBrowserCdpUrl() uses toWebSocketUrl() + buildUrl() with access_token query param, same as buildDesktopStreamWebSocketUrl()."
     },
     {
       "id": "US-021",
@@ -343,8 +343,8 @@
         "Typecheck passes"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Methods follow same requestJson pattern as lifecycle methods. Type imports added alphabetically. closeBrowserTab uses DELETE method. createBrowserTab and browserReload have optional request params."
     },
     {
       "id": "US-022",
@@ -362,7 +362,7 @@
         "Typecheck passes"
       ],
       "priority": 22,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -380,8 +380,8 @@
         "Typecheck passes"
       ],
       "priority": 23,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "All 7 interaction methods follow the same requestJson POST pattern with BrowserActionResponse return type. Type imports added alphabetically."
     },
     {
       "id": "US-024",
@@ -400,7 +400,7 @@
         "Typecheck passes"
       ],
       "priority": 24,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -416,7 +416,7 @@
         "Typecheck passes"
       ],
       "priority": 25,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
@@ -433,8 +433,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 26,
-      "passes": false,
-      "notes": "Follow DesktopTab.tsx patterns for card layout and state management"
+      "passes": true,
+      "notes": "Follows DesktopTab.tsx patterns for card layout and state management. BrowserViewerClient used for live view with DesktopViewer component. Navigation bar with back/forward/reload + URL input. Context dropdown populated from getBrowserContexts(). Auto-refresh every 5s when active. BrowserStartRequest doesn't have 'streaming' field - removed it."
     },
     {
       "id": "US-027",
@@ -448,8 +448,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 27,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Screenshot uses createScreenshotUrl blob pattern from DesktopTab. Tabs reuse desktop-window-item/desktop-window-focused CSS classes. Console auto-refreshes every 3s with level filter pills. All three sections conditionally rendered only when isActive."
     },
     {
       "id": "US-028",
@@ -465,8 +465,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 28,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Network section auto-refreshes every 3s with URL pattern filter. Content Tools has Get HTML/Markdown/Links/Snapshot buttons with output textarea. Recording reuses desktop recording API (startDesktopRecording/stopDesktopRecording/listDesktopRecordings). Contexts section with list/create/delete/Use button sets contextId for next browser start. Diagnostics shows lastError and process list from BrowserStatusResponse."
     },
     {
       "id": "US-029",
@@ -486,8 +486,128 @@
         "Tests pass"
       ],
       "priority": 29,
+      "passes": true,
+      "notes": "Run with: cargo test -p sandbox-agent --test browser_api. Fixed CdpClient to connect to page endpoint instead of browser endpoint for Page/Runtime/DOM commands. Chromium added to test Docker image."
+    },
+    {
+      "id": "US-030",
+      "title": "Fix crawl page load: replace sleep with readyState polling",
+      "description": "As a user, I need the crawl endpoint to reliably wait for pages to load instead of using a fixed 500ms sleep.",
+      "acceptanceCriteria": [
+        "In browser_crawl.rs, replace `tokio::time::sleep(Duration::from_millis(500))` after Page.navigate with a polling loop that checks `document.readyState === 'complete'` via Runtime.evaluate",
+        "Polling should check every 100ms with a configurable timeout (default 10s)",
+        "If timeout is reached, proceed with extraction anyway (don't fail the crawl)",
+        "Typecheck passes"
+      ],
+      "priority": 30,
+      "passes": true,
+      "notes": "Current code at browser_crawl.rs:61 uses a hard-coded 500ms sleep which is too short for slow pages and wastes time on fast pages."
+    },
+    {
+      "id": "US-031",
+      "title": "Fix crawl navigation status: use real HTTP status instead of faked 200",
+      "description": "As a user, I need crawl results to report the actual HTTP status code, not always 200.",
+      "acceptanceCriteria": [
+        "In browser_crawl.rs, enable Network domain (Network.enable) before crawling",
+        "Capture the actual HTTP status from Network.responseReceived for each navigated page",
+        "Replace the faked `nav_result.get(\"frameId\").map(|_| 200u16)` with the real status",
+        "If Page.navigate returns an errorText field, record the page with status None and skip link extraction",
+        "Typecheck passes"
+      ],
+      "priority": 31,
+      "passes": true,
+      "notes": "Enabled Network domain, subscribed to Network.responseReceived events, drain buffered events after readyState complete to get real HTTP status. Handles errorText from Page.navigate by recording None status and skipping extraction. Takes last Document response to handle redirect chains."
+    },
+    {
+      "id": "US-032",
+      "title": "Remove dead cdp_client() method from BrowserRuntime",
+      "description": "As a developer, I want to remove dead code that always returns an error.",
+      "acceptanceCriteria": [
+        "Remove the `pub async fn cdp_client()` method from BrowserRuntime in browser_runtime.rs that always returns Err('Use with_cdp() to execute CDP commands')",
+        "Verify no callers reference cdp_client() (only get_cdp() and with_cdp() should be used)",
+        "If any callers exist, migrate them to get_cdp()",
+        "Typecheck passes"
+      ],
+      "priority": 32,
+      "passes": true,
+      "notes": "browser_runtime.rs:553-564 always returns an error telling callers to use with_cdp(). This is dead code that confuses the API surface."
+    },
+    {
+      "id": "US-033",
+      "title": "Fix default display dimensions to match spec (1280x720)",
+      "description": "As a developer, I need the default browser dimensions to match the spec.",
+      "acceptanceCriteria": [
+        "Change DEFAULT_WIDTH from 1440 to 1280 in browser_runtime.rs",
+        "Change DEFAULT_HEIGHT from 900 to 720 in browser_runtime.rs",
+        "Typecheck passes"
+      ],
+      "priority": 33,
       "passes": false,
-      "notes": "Run with: cargo test -p sandbox-agent --test browser_api"
+      "notes": "Spec section 3.1 says defaults are 1280x720 but browser_runtime.rs uses 1440x900."
+    },
+    {
+      "id": "US-034",
+      "title": "Add reverse mutual exclusivity check in DesktopRuntime",
+      "description": "As a developer, I need DesktopRuntime to reject start when BrowserRuntime is active.",
+      "acceptanceCriteria": [
+        "In DesktopRuntime.start(), check if BrowserRuntime is active before proceeding",
+        "If BrowserRuntime state is Active, return a 409 Conflict error with message explaining browser and desktop modes are mutually exclusive",
+        "This mirrors the existing check in BrowserRuntime.start() that checks DesktopRuntime",
+        "BrowserRuntime may need to be added to DesktopRuntime's constructor or accessed via shared app state",
+        "Typecheck passes"
+      ],
+      "priority": 34,
+      "passes": false,
+      "notes": "Currently BrowserRuntime checks DesktopRuntime before starting, but DesktopRuntime does not check BrowserRuntime. This is a one-sided guard."
+    },
+    {
+      "id": "US-035",
+      "title": "Fix BrowserProblem misuse: use correct error variants for non-startup failures",
+      "description": "As a developer, I need error variants to be used correctly so error codes are meaningful.",
+      "acceptanceCriteria": [
+        "In browser_context.rs, change delete_context's fs::remove_dir_all error from BrowserProblem::start_failed to a more appropriate variant (e.g. cdp_error or add a new internal_error variant)",
+        "In browser_context.rs, change list_contexts's fs::read_dir error from BrowserProblem::start_failed similarly",
+        "In browser_context.rs, change create_context's fs errors from BrowserProblem::start_failed similarly",
+        "Fix the no-op comment at browser_runtime.rs console event handler: 'CDP uses warning as type but we normalize to warning' (same value, comment is misleading - either remove the comment or actually normalize 'warning' to 'warn')",
+        "Typecheck passes"
+      ],
+      "priority": 35,
+      "passes": false,
+      "notes": "BrowserProblem::start_failed (500 status, browser/start-failed code) is used as a catch-all for filesystem errors in browser_context.rs which makes error codes meaningless for API consumers."
+    },
+    {
+      "id": "US-036",
+      "title": "Add integration tests for console and network monitoring",
+      "description": "As a developer, I need tests that verify console and network monitoring actually capture events.",
+      "acceptanceCriteria": [
+        "Add test v1_browser_console_monitoring to browser_api.rs",
+        "Test navigates to a page that calls console.log('test-message') and console.error('test-error')",
+        "Test calls GET /v1/browser/console and verifies the messages array contains entries with matching text and correct levels",
+        "Test calls GET /v1/browser/console?level=error and verifies only error-level messages are returned",
+        "Add test v1_browser_network_monitoring to browser_api.rs",
+        "Test navigates to a page, then calls GET /v1/browser/network and verifies at least one request entry exists with a url, method, and status",
+        "Tests pass"
+      ],
+      "priority": 36,
+      "passes": false,
+      "notes": "Console and network monitoring have real complexity (background tasks, ring buffers, event correlation) but zero test coverage currently."
+    },
+    {
+      "id": "US-037",
+      "title": "Add integration tests for crawling",
+      "description": "As a developer, I need tests that verify the crawl endpoint works with multiple pages.",
+      "acceptanceCriteria": [
+        "Add test v1_browser_crawl to browser_api.rs",
+        "Write 3 test HTML pages: page-a.html links to page-b.html, page-b.html links to page-c.html, page-c.html has no links",
+        "Test POST /v1/browser/crawl with url=file:///tmp/page-a.html, maxDepth=2, extract=text",
+        "Verify response has 3 pages with correct depths (0, 1, 2)",
+        "Verify totalPages is 3 and truncated is false",
+        "Test maxPages=1 returns only 1 page and truncated is true",
+        "Tests pass"
+      ],
+      "priority": 37,
+      "passes": false,
+      "notes": "Crawl has real logic (BFS, domain filtering, depth limits, URL normalization) but no test coverage."
     }
   ]
 }

@@ -24,8 +24,8 @@ use crate::process_runtime::{
     ProcessOwner, ProcessRuntime, ProcessStartSpec, ProcessStatus, RestartPolicy,
 };
 
-const DEFAULT_WIDTH: u32 = 1440;
-const DEFAULT_HEIGHT: u32 = 900;
+const DEFAULT_WIDTH: u32 = 1280;
+const DEFAULT_HEIGHT: u32 = 720;
 const DEFAULT_DPI: u32 = 96;
 const DEFAULT_DISPLAY_NUM: i32 = 98;
 const MAX_DISPLAY_PROBE: i32 = 10;

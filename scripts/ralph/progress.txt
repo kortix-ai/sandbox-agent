@@ -22,6 +22,10 @@
 - `BrowserRuntime::ensure_active()` is a reusable guard for any handler requiring active browser state
 - `BrowserRuntime::get_cdp()` returns `Arc<CdpClient>` without holding state lock; preferred over `with_cdp()` closure for handlers that do multiple async CDP calls (avoids lifetime issues)
 - `CdpClient::close()` takes `&self` (not `self`); CdpClient is stored as `Option<Arc<CdpClient>>` in BrowserRuntimeStateData
+- CdpClient MUST connect to a page endpoint (`/json/list` → first page's `webSocketDebuggerUrl`), NOT the browser endpoint from `/json/version`. Page/Runtime/DOM commands only work on page-level connections.
+- Integration tests use Docker containers via `TestApp::new(AuthConfig::disabled())` from `support/docker.rs`; `#[serial]` for sequential execution
+- Test helper `write_test_file()` uses `PUT /v1/fs/file?path=...` to write HTML test fixtures into the container
+- `docker/test-agent/Dockerfile` must include chromium + deps (libnss3, libatk-bridge2.0-0, libdrm2, libxcomposite1, libxdamage1, libxrandr2, libgbm1, libasound2, libpangocairo-1.0-0, libgtk-3-0) for browser integration tests
 - `get_page_info_via_cdp()` is a helper fn in router.rs for getting current URL and title via Runtime.evaluate
 - CDP `Page.getNavigationHistory` returns `{currentIndex, entries: [{id, url, title}]}` for back/forward navigation
 - CDP `Page.navigateToHistoryEntry` takes `{entryId}` (the id from history entries, not the index)
@@ -43,6 +47,21 @@
 - For internal-only fields in API types, use `#[serde(default, skip_serializing)]` to keep them out of JSON responses
 - Browser context management is pure filesystem CRUD; each context is a directory under `{state_dir}/browser-contexts/{id}/` with a `context.json` metadata file
 - Use hex-encoded /dev/urandom bytes for generating IDs (same pattern as telemetry.rs) to avoid adding new crate deps
+- CDP `Network.getCookies`/`setCookies`/`deleteCookies`/`clearBrowserCookies` for cookie CRUD; sameSite values are capitalized strings ("Strict", "Lax", "None")
+- For complex multi-page logic (e.g., crawl), put business logic in a separate module file and call it from the router handler; keeps router.rs manageable
+- `url` crate available as workspace dependency for URL parsing/domain extraction
+- TypeScript SDK types pipeline: (1) `cargo run -p sandbox-agent-openapi-gen -- --out docs/openapi.json`, (2) `npx openapi-typescript docs/openapi.json -o src/generated/openapi.ts && node ./scripts/patch-openapi-types.mjs`, (3) add type aliases in `types.ts` using `JsonResponse`/`JsonRequestBody`/`QueryParams` utilities, (4) export from `index.ts`
+- TypeScript SDK types are extracted from generated OpenAPI types, NOT manually written interfaces; operation IDs follow `{method}_v1_{domain}_{action}` pattern
+- For QueryParams types that might resolve to `never`, use defensive pattern: `QueryParams<T> extends never ? Record<string, never> : QueryParams<T>`
+- SDK method patterns: `requestJson("GET"|"POST", path)` for JSON, `requestRaw("GET", path, {query, accept})` for binary, `toWebSocketUrl(buildUrl(path, {access_token}))` for WS URLs; type imports go alphabetically in the `import { ... } from "./types.ts"` block
+- SDK binary response pattern (screenshot/pdf): `requestRaw("GET", path, {query, accept: "image/*"})` → `response.arrayBuffer()` → `new Uint8Array(buffer)`
+- SDK content extraction methods: `requestJson("GET", path, {query})` for JSON endpoints, `requestRaw("GET", path, {query, accept})` for binary; query param types use the defensive `extends never` pattern
+- React SDK components use inline CSSProperties styles (no CSS modules or Tailwind), with base shell/status/viewport styles as const objects
+- React SDK `BrowserViewerClient`/`DesktopViewerClient` use `Pick<SandboxAgent, ...>` for loose coupling; when adding new components that depend on SDK methods, the TypeScript SDK dist must be rebuilt first (`npx tsup` in sdks/typescript/) before React SDK typecheck passes
+- React SDK barrel exports are alphabetically ordered; component exports first, then type exports grouped by source file
+- Inspector debug tab pattern: (1) add to `DebugTab` union in DebugPanel.tsx, (2) import component, (3) add icon button in tabs section, (4) add conditional render `{debugTab === "x" && <XTab getClient={getClient} />}` in content section
+- Inspector tab components reuse `desktop-panel`, `desktop-state-grid`, `desktop-start-controls`, `desktop-input-group`, `card`, `card-header`, `card-meta`, `card-actions` CSS classes
+- `Parameters<SandboxAgent["methodName"]>[0]` derives request types from SDK method signatures in inspector components
 
 # Ralph Progress Log
 Started: Tue Mar 17 04:32:06 AM PDT 2026
@@ -307,4 +326,284 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
   - `BrowserRuntime.config.state_dir` was private; added `state_dir()` pub accessor for context module access
   - Context types (BrowserContextInfo, BrowserContextListResponse, BrowserContextCreateRequest) were already defined in browser_types.rs from US-003
   - `tempfile` crate is a workspace dev-dependency available via `test-utils` feature flag
+---
+
+## 2026-03-17 - US-017
+- Implemented 3 browser cookie management HTTP endpoints: GET /v1/browser/cookies, POST /v1/browser/cookies, DELETE /v1/browser/cookies
+- GET /v1/browser/cookies: accepts optional `url` query param; uses CDP `Network.getCookies` with optional `urls` array; maps CDP cookie fields (httpOnly, sameSite) to BrowserCookie struct
+- POST /v1/browser/cookies: accepts `{cookies: [...]}` body; maps BrowserCookie fields to CDP format; uses CDP `Network.setCookies`
+- DELETE /v1/browser/cookies: accepts optional `name`, `domain` query params; if no filters, uses `Network.clearBrowserCookies`; if filtered, fetches all cookies via `Network.getCookies`, matches by name/domain, deletes each via `Network.deleteCookies`
+- Routes registered with combined `get().post().delete()` on single `/browser/cookies` path
+- OpenAPI paths and schemas registered for all 3 handlers and all cookie types (BrowserCookie, BrowserCookieSameSite, BrowserCookiesQuery, BrowserCookiesResponse, BrowserSetCookiesRequest, BrowserDeleteCookiesQuery)
+- Files changed: router.rs
+- **Learnings for future iterations:**
+  - CDP `Network.getCookies` takes `{urls?: [string]}` and returns `{cookies: [{name, value, domain, path, expires, httpOnly, secure, sameSite, ...}]}`
+  - CDP `Network.setCookies` takes `{cookies: [{name, value, domain?, path?, expires?, httpOnly?, secure?, sameSite?}]}`
+  - CDP `Network.deleteCookies` takes `{name, domain?, path?}` to delete specific cookies
+  - CDP `Network.clearBrowserCookies` takes no params and clears all cookies
+  - CDP cookie `sameSite` values are "Strict", "Lax", "None" (capitalized strings)
+  - CDP cookie `expires` is 0 for session cookies; filter with `> 0.0` before returning
+  - For delete with filters, must first fetch all cookies then match and delete individually (CDP has no bulk-filter-delete)
+  - Axum route `.get().post().delete()` chaining works for registering multiple HTTP methods on same path
+---
+
+## 2026-03-17 - US-018
+- Created `browser_crawl.rs` with BFS crawl implementation using CDP
+- POST /v1/browser/crawl: accepts `{url, maxPages?, maxDepth?, allowedDomains?, extract?}`
+- Returns `{pages: [{url, title, content, links, status, depth}], totalPages, truncated}`
+- 4 content extraction modes: markdown (strips nav/footer/aside, uses html2md), html (outerHTML), text (innerText), links (empty content, links in links field)
+- BFS queue with visited set for URL deduplication (fragment-stripped normalization)
+- Domain filtering via `url` crate; defaults to same-domain-only if no allowedDomains specified
+- maxPages default 10, capped at 100; maxDepth default 2
+- Added `url.workspace = true` dependency to sandbox-agent Cargo.toml
+- Route registered at `/browser/crawl` in v1_router, OpenAPI paths and schemas registered
+- Files changed: browser_crawl.rs (new), Cargo.toml, lib.rs, router.rs
+- **Learnings for future iterations:**
+  - `url` crate (v2.5) is a workspace dependency, just add `url.workspace = true` to package Cargo.toml
+  - `Url::parse()` + `host_str()` is the clean way to extract domains from URLs for filtering
+  - Crawl logic is kept in a separate module (browser_crawl.rs) rather than inline in router.rs since it has substantial business logic
+  - The crawl reuses the same CDP patterns: Page.navigate for navigation, Runtime.evaluate for content extraction, JSON.stringify for link collection
+  - Fragment-stripped URL normalization (`Url::set_fragment(None)`) prevents crawling the same page with different anchors
+  - `truncated` field signals whether there were more pages in the queue when max_pages was reached
+---
+
+## 2026-03-17 - US-019
+- Added 55 browser type aliases to `sdks/typescript/src/types.ts` following existing desktop type pattern
+- Regenerated `docs/openapi.json` from Rust server (now includes all browser endpoints)
+- Regenerated `sdks/typescript/src/generated/openapi.ts` via `openapi-typescript`
+- Exported all browser types from `sdks/typescript/src/index.ts` barrel file
+- Types cover: lifecycle (BrowserState, BrowserStartRequest, BrowserStatusResponse), navigation (BrowserNavigateRequest, BrowserPageInfo, BrowserWaitRequest/Response), tabs (BrowserTabInfo, BrowserTabListResponse, BrowserCreateTabRequest), screenshots/PDF (BrowserScreenshotQuery/Format, BrowserPdfQuery/Format), content extraction (BrowserContentQuery/Response, BrowserMarkdownResponse, BrowserLinksResponse, BrowserSnapshotResponse), scrape/execute (BrowserScrapeRequest/Response, BrowserExecuteRequest/Response), interaction (BrowserClickRequest, BrowserTypeRequest, BrowserSelectRequest, BrowserHoverRequest, BrowserScrollRequest, BrowserUploadRequest, BrowserDialogRequest, BrowserActionResponse), monitoring (BrowserConsoleQuery/Message/Response, BrowserNetworkQuery/Request/Response), crawl (BrowserCrawlRequest/Page/Response/Extract), contexts (BrowserContextInfo/ListResponse/CreateRequest), cookies (BrowserCookie/SameSite, BrowserCookiesQuery/Response, BrowserSetCookiesRequest, BrowserDeleteCookiesQuery)
+- Files changed: types.ts, index.ts, generated/openapi.ts, docs/openapi.json
+- **Learnings for future iterations:**
+  - TypeScript SDK types are NOT manually written interfaces; they're type aliases extracted from generated OpenAPI types using `JsonResponse`, `JsonRequestBody`, `QueryParams` generic utilities
+  - Must regenerate OpenAPI pipeline first: `cargo run -p sandbox-agent-openapi-gen -- --out docs/openapi.json` then `npx openapi-typescript ... -o src/generated/openapi.ts && node ./scripts/patch-openapi-types.mjs`
+  - For query param types that might resolve to `never`, use the `extends never ? Record<string, never> : ...` pattern (see DesktopScreenshotQuery)
+  - biome pre-commit hook auto-formats; files may be reformatted on commit
+  - Operation IDs follow pattern: `{method}_v1_browser_{action}` (e.g., `post_v1_browser_start`, `get_v1_browser_status`)
+  - Component schemas use the exact Rust struct name (e.g., `BrowserStartRequest`, `BrowserState`)
+---
+
+## 2026-03-17 - US-020
+- Added 4 browser lifecycle/CDP methods to SandboxAgent class in sdks/typescript/src/client.ts:
+  - `startBrowser(request?)` → POST /v1/browser/start
+  - `stopBrowser()` → POST /v1/browser/stop
+  - `getBrowserStatus()` → GET /v1/browser/status
+  - `getBrowserCdpUrl(options?)` → builds ws:// URL for /v1/browser/cdp with access_token
+- Imported `BrowserStartRequest` and `BrowserStatusResponse` types from types.ts
+- Methods placed after desktop stream methods, before private getLiveConnection
+- Files changed: client.ts
+- **Learnings for future iterations:**
+  - SDK methods follow 1:1 pattern with desktop counterparts: `requestJson("METHOD", path, {body/query})` for JSON, `toWebSocketUrl(buildUrl(...))` for WS URLs
+  - Type imports are added alphabetically in the main `import { ... } from "./types.ts"` block
+  - `getBrowserCdpUrl()` is sync (not async) since it just constructs a URL, same as `buildDesktopStreamWebSocketUrl()`
+  - Reuses `ProcessTerminalWebSocketUrlOptions` type for the options param (contains `accessToken?: string`)
+  - biome pre-commit formats automatically; no manual formatting needed
+---
+
+## 2026-03-17 - US-021
+- Added 9 browser navigation and tab methods to SandboxAgent class in sdks/typescript/src/client.ts:
+  - `browserNavigate(request)` → POST /v1/browser/navigate → BrowserPageInfo
+  - `browserBack()` → POST /v1/browser/back → BrowserPageInfo
+  - `browserForward()` → POST /v1/browser/forward → BrowserPageInfo
+  - `browserReload(request?)` → POST /v1/browser/reload → BrowserPageInfo
+  - `browserWait(request)` → POST /v1/browser/wait → BrowserWaitResponse
+  - `getBrowserTabs()` → GET /v1/browser/tabs → BrowserTabListResponse
+  - `createBrowserTab(request?)` → POST /v1/browser/tabs → BrowserTabInfo
+  - `activateBrowserTab(tabId)` → POST /v1/browser/tabs/:id/activate → BrowserTabInfo
+  - `closeBrowserTab(tabId)` → DELETE /v1/browser/tabs/:id → BrowserActionResponse
+- Added 9 type imports alphabetically: BrowserActionResponse, BrowserCreateTabRequest, BrowserNavigateRequest, BrowserPageInfo, BrowserReloadRequest, BrowserTabInfo, BrowserTabListResponse, BrowserWaitRequest, BrowserWaitResponse
+- Files changed: client.ts
+- **Learnings for future iterations:**
+  - Navigation methods (back/forward/reload) have no required request body, but reload accepts optional BrowserReloadRequest
+  - Tab methods use path params for tab IDs: `/browser/tabs/${tabId}/activate` and `/browser/tabs/${tabId}`
+  - createBrowserTab request body is optional (defaults to empty tab)
+  - closeBrowserTab returns BrowserActionResponse ({ok: true}), not BrowserTabInfo
+  - DELETE HTTP method works with requestJson same as GET/POST
+---
+
+## 2026-03-17 - US-022
+- Added 8 browser content extraction methods to SandboxAgent class in sdks/typescript/src/client.ts:
+  - `takeBrowserScreenshot(query?)` → GET /v1/browser/screenshot → Uint8Array (binary, requestRaw)
+  - `getBrowserPdf(query?)` → GET /v1/browser/pdf → Uint8Array (binary, requestRaw with accept: "application/pdf")
+  - `getBrowserContent(query?)` → GET /v1/browser/content → BrowserContentResponse
+  - `getBrowserMarkdown()` → GET /v1/browser/markdown → BrowserMarkdownResponse
+  - `scrapeBrowser(request)` → POST /v1/browser/scrape → BrowserScrapeResponse
+  - `getBrowserLinks()` → GET /v1/browser/links → BrowserLinksResponse
+  - `executeBrowserScript(request)` → POST /v1/browser/execute → BrowserExecuteResponse
+  - `getBrowserSnapshot()` → GET /v1/browser/snapshot → BrowserSnapshotResponse
+- Added 10 type imports alphabetically: BrowserContentQuery, BrowserContentResponse, BrowserExecuteRequest, BrowserExecuteResponse, BrowserLinksResponse, BrowserMarkdownResponse, BrowserPdfQuery, BrowserScreenshotQuery, BrowserScrapeRequest, BrowserScrapeResponse, BrowserSnapshotResponse
+- Files changed: client.ts
+- **Learnings for future iterations:**
+  - Screenshot uses `requestRaw` with `accept: "image/*"`, PDF uses `requestRaw` with `accept: "application/pdf"` - both return `Uint8Array` via `response.arrayBuffer()`
+  - Content extraction GET endpoints with optional query params use `requestJson("GET", path, { query })` pattern
+  - Scrape and execute are POST endpoints with required request bodies
+  - getBrowserMarkdown, getBrowserLinks, getBrowserSnapshot have no parameters (simple GET endpoints)
+  - Parameter name is `query` (not `request`) for GET endpoints with query params, matching desktop screenshot pattern
+---
+
+## 2026-03-17 - US-023
+- Added 7 browser interaction methods to SandboxAgent class in sdks/typescript/src/client.ts:
+  - `browserClick(request)` → POST /v1/browser/click → BrowserActionResponse
+  - `browserType(request)` → POST /v1/browser/type → BrowserActionResponse
+  - `browserSelect(request)` → POST /v1/browser/select → BrowserActionResponse
+  - `browserHover(request)` → POST /v1/browser/hover → BrowserActionResponse
+  - `browserScroll(request)` → POST /v1/browser/scroll → BrowserActionResponse
+  - `browserUpload(request)` → POST /v1/browser/upload → BrowserActionResponse
+  - `browserDialog(request)` → POST /v1/browser/dialog → BrowserActionResponse
+- Added 7 type imports alphabetically: BrowserClickRequest, BrowserDialogRequest, BrowserHoverRequest, BrowserScrollRequest, BrowserSelectRequest, BrowserTypeRequest, BrowserUploadRequest
+- Files changed: client.ts
+- **Learnings for future iterations:**
+  - All browser interaction methods follow the exact same pattern: `requestJson("POST", path, { body: request })` returning `BrowserActionResponse`
+  - BrowserActionResponse is shared across all interaction endpoints (already imported from US-021)
+  - Methods placed after content extraction methods and before private getLiveConnection
+---
+
+## 2026-03-17 - US-024
+- Added 9 browser monitoring, crawl, context, and cookie methods to SandboxAgent class in sdks/typescript/src/client.ts:
+  - `getBrowserConsole(query?)` → GET /v1/browser/console → BrowserConsoleResponse
+  - `getBrowserNetwork(query?)` → GET /v1/browser/network → BrowserNetworkResponse
+  - `crawlBrowser(request)` → POST /v1/browser/crawl → BrowserCrawlResponse
+  - `getBrowserContexts()` → GET /v1/browser/contexts → BrowserContextListResponse
+  - `createBrowserContext(request)` → POST /v1/browser/contexts → BrowserContextInfo
+  - `deleteBrowserContext(contextId)` → DELETE /v1/browser/contexts/:id → BrowserActionResponse
+  - `getBrowserCookies(query?)` → GET /v1/browser/cookies → BrowserCookiesResponse
+  - `setBrowserCookies(request)` → POST /v1/browser/cookies → BrowserActionResponse
+  - `deleteBrowserCookies(query?)` → DELETE /v1/browser/cookies → BrowserActionResponse
+- Added 12 type imports alphabetically: BrowserConsoleQuery, BrowserConsoleResponse, BrowserContextCreateRequest, BrowserContextInfo, BrowserContextListResponse, BrowserCookiesQuery, BrowserCookiesResponse, BrowserCrawlRequest, BrowserCrawlResponse, BrowserDeleteCookiesQuery, BrowserNetworkQuery, BrowserNetworkResponse, BrowserSetCookiesRequest
+- Files changed: client.ts
+- **Learnings for future iterations:**
+  - Monitoring endpoints (console/network) use GET with optional query params, same pattern as content extraction
+  - Context CRUD: GET for list, POST for create (returns BrowserContextInfo, not BrowserContextListResponse), DELETE with path param for delete
+  - Cookie methods mirror the Rust HTTP API exactly: GET/POST/DELETE on same /cookies path
+  - deleteBrowserCookies uses query params (not body) for filter criteria, matching the Rust DELETE handler
+  - createBrowserContext returns BrowserContextInfo (single context), not BrowserContextListResponse
+---
+
+## 2026-03-17 - US-025
+- Created `sdks/react/src/BrowserViewer.tsx` with BrowserViewer component that wraps DesktopViewer with a browser navigation bar
+- BrowserViewerClient type uses `Pick<SandboxAgent, "connectDesktopStream" | "browserNavigate" | "browserBack" | "browserForward" | "browserReload" | "getBrowserStatus">`
+- BrowserViewerProps: client, className, style, height (default 480), showNavigationBar (default true), showStatusBar (default true), onNavigate, onConnect, onDisconnect, onError
+- Navigation bar has back/forward/reload buttons and URL input with Enter-to-navigate
+- URL auto-prefixes https:// if no protocol specified
+- Syncs URL display from getBrowserStatus() on stream connect
+- Passes DesktopViewer props with shell styling overridden (no double border/shadow)
+- Exported BrowserViewer + BrowserViewerClient + BrowserViewerProps from index.ts
+- Files changed: BrowserViewer.tsx (new), index.ts
+- **Learnings for future iterations:**
+  - React SDK references `sandbox-agent` via workspace symlink but uses compiled dist types; must rebuild TypeScript SDK (`npx tsup` in sdks/typescript/) after adding new methods before React typecheck works
+  - biome pre-commit reformats: `Pick<>` union types get collapsed to single line, style objects stay as-is
+  - DesktopViewer accepts style prop which can override its shell styling (border, borderRadius, background, boxShadow) - useful for embedding inside a wrapper component
+  - BrowserViewer composes DesktopViewer rather than duplicating WebRTC logic; the stream is the same (Neko on Xvfb display)
+---
+
+## 2026-03-17 - US-026
+- Created `BrowserTab.tsx` in `frontend/packages/inspector/src/components/debug/` with two sections:
+  - Section 1 - Runtime Control: state pill (active/inactive/install_required/failed), status grid (URL, Resolution, Started), config inputs (Width, Height, URL, Context dropdown), Start/Stop buttons, auto-refresh every 5s when active
+  - Section 2 - Live View: navigation bar (Back, Forward, Reload + URL input), DesktopViewer component for WebRTC stream, current URL display
+- Updated `DebugPanel.tsx`: added `"browser"` to DebugTab type, imported BrowserTab, added Globe icon tab button after Desktop, added render condition
+- Typecheck passes
+- Files changed: BrowserTab.tsx (new), DebugPanel.tsx
+- **Learnings for future iterations:**
+  - Inspector tab pattern: add to DebugTab union type, import component, add button with icon in tabs section, add conditional render in content section
+  - `BrowserStartRequest` does NOT have a `streaming` field (unlike what might be expected); just omit it
+  - `BrowserViewerClient` from `@sandbox-agent/react` uses `Pick<SandboxAgent, ...>` and requires `connectDesktopStream`, `browserNavigate`, `browserBack`, `browserForward`, `browserReload`, `getBrowserStatus`
+  - Reuse `desktop-panel`, `desktop-state-grid`, `desktop-start-controls`, `desktop-input-group` CSS classes from DesktopTab for consistent layout
+  - biome pre-commit hook reformats: ternary chains get collapsed, style objects adjusted
+  - `Parameters<SandboxAgent["methodName"]>[0]` is the pattern for deriving request types from SDK method signatures
+  - Browser contexts are loaded via `getBrowserContexts()` and shown in a dropdown; the contextId is passed to `startBrowser()`
+  - Manual browser verification needed (no browser testing tools available in this environment)
+---
+
+## 2026-03-17 - US-027
+- Implemented Screenshot, Tabs, and Console sections in BrowserTab.tsx
+- Files changed:
+  - frontend/packages/inspector/src/components/debug/BrowserTab.tsx
+- **What was implemented:**
+  - Section 3 - Screenshot: format selector (PNG/JPEG/WebP), quality input (hidden for PNG), fullPage checkbox, CSS selector input, capture button with loading state, preview image with blob URL management
+  - Section 4 - Tabs: list of open tabs with URL/title, active tab highlighted with green pill, per-tab Activate/Close buttons, New Tab button with URL input (Enter key support)
+  - Section 5 - Console: level filter pills (All/Log/Warn/Error/Info), scrollable message list with level-colored dot indicators and timestamps, auto-refresh every 3s when active
+- **Learnings for future iterations:**
+  - `createScreenshotUrl` helper converts Uint8Array to blob URL; must be paired with `revokeScreenshotUrl` for cleanup
+  - `desktop-window-item` and `desktop-window-focused` CSS classes work well for any list item with active state highlighting (not just windows)
+  - `desktop-screenshot-controls` and `desktop-screenshot-frame`/`desktop-screenshot-image` CSS classes are reusable across browser and desktop screenshot sections
+  - Console auto-refresh at 3s interval is distinct from status auto-refresh at 5s; both use the same useEffect + setInterval pattern with cleanup
+  - `getBrowserConsole({ level })` accepts a level filter param; passing empty object gets all levels
+  - Tabs and console are loaded eagerly when browser becomes active via a `status?.state === "active"` useEffect dependency
+  - Manual browser verification needed (no browser testing tools available in this environment)
+---
+
+## 2026-03-17 - US-028
+- Added 5 new sections to BrowserTab.tsx: Network, Content Tools, Recording, Contexts, Diagnostics
+- Files changed: frontend/packages/inspector/src/components/debug/BrowserTab.tsx
+- **What was implemented:**
+  - Section 6 - Network: request list with method/URL/status/size/duration, URL pattern filter input, auto-refresh every 3s
+  - Section 7 - Content Tools: Get HTML, Get Markdown, Get Links, Get Snapshot buttons with readonly output textarea
+  - Section 8 - Recording: reuses desktop recording API (startDesktopRecording/stopDesktopRecording/listDesktopRecordings/downloadDesktopRecording/deleteDesktopRecording), FPS input, start/stop buttons, recording list with download/delete, poll while recording active
+  - Section 9 - Contexts: list browser contexts with name/id/size/date, create form, delete button, Use button to set contextId, refresh button
+  - Section 10 - Diagnostics: lastError details (code + message), process list with name/pid/running state/logPath
+- **Learnings for future iterations:**
+  - Recording is a shared desktop-level feature (Xvfb recording), not browser-specific; browser and desktop tabs share the same recording API
+  - `downloadDesktopRecording` returns `Uint8Array` which needs the same `new Uint8Array(bytes.byteLength); payload.set(bytes)` workaround for Blob creation (TypeScript ArrayBufferLike vs ArrayBuffer type mismatch)
+  - Network requests use `BrowserNetworkRequest` type with `responseSize` and `duration` fields (both nullable)
+  - Content tools reuse existing SDK methods: getBrowserContent, getBrowserMarkdown, getBrowserLinks, getBrowserSnapshot
+  - Context management is available even when browser is not active (filesystem-based), so the Contexts section is always shown
+  - Diagnostics section conditionally renders only when there's data (lastError or processes)
+  - Manual browser verification needed (no browser testing tools available in this environment)
+---
+
+## 2026-03-17 - US-029
+- Implemented browser API integration tests
+- Files changed:
+  - `docker/test-agent/Dockerfile` - Added chromium and browser dependency packages
+  - `server/packages/sandbox-agent/tests/browser_api.rs` - New integration test file with 7 test functions
+  - `server/packages/sandbox-agent/src/browser_cdp.rs` - Fixed CdpClient to connect to page endpoint instead of browser endpoint
+- Test coverage:
+  - `v1_browser_status_reports_install_required_when_chromium_missing` - Missing deps detection
+  - `v1_browser_lifecycle_and_navigation` - Start, status, navigate, back, forward, reload, stop
+  - `v1_browser_tabs_management` - List, create, activate, close tabs
+  - `v1_browser_screenshots` - PNG, JPEG, WebP screenshot capture
+  - `v1_browser_content_extraction` - HTML, markdown, links, accessibility snapshot
+  - `v1_browser_interaction` - Click button, type text, verify state via execute
+  - `v1_browser_contexts_management` - Create, list, delete persistent browser profiles
+- **Learnings for future iterations:**
+  - CdpClient must connect to a page-level endpoint (`/json/list` → first page), not the browser-level endpoint (`/json/version`). Browser endpoints only support Target/Browser domains; Page/Runtime/DOM commands need page sessions.
+  - The CDP proxy endpoint (`/v1/browser/cdp`) correctly uses the browser-level URL since external tools (Playwright/Puppeteer) handle session management themselves.
+  - Test files can be written into the container via `PUT /v1/fs/file?path=...` and then navigated to via `file:///` URLs.
+  - Docker image rebuild is triggered by `OnceLock` in the test harness; changing the Dockerfile or server binary invalidates the cached image tag.
+  - `reqwest::Client.query(&[("path", path)])` properly URL-encodes query parameters (no need for `urlencoding` crate).
+---
+
+## 2026-03-17 - US-030
+- Replaced fixed 500ms `tokio::time::sleep` in `browser_crawl.rs` with a `document.readyState` polling loop
+- Polls every 100ms via `Runtime.evaluate`, times out after 10s, proceeds with extraction on timeout
+- Files changed: `server/packages/sandbox-agent/src/browser_crawl.rs`
+- **Learnings for future iterations:**
+  - CDP `Runtime.evaluate` with `document.readyState` is reliable for detecting page load completion
+  - Using `std::time::Instant` for timeout tracking avoids drift issues compared to counting iterations
+  - Graceful timeout (proceed anyway) is better than failing the crawl when a page is slow
+---
+
+## 2026-03-17 - US-031
+- Replaced faked `200` status with real HTTP status from `Network.responseReceived` CDP events
+- Enabled `Network.enable` domain before crawl loop
+- Subscribe to `Network.responseReceived` once, drain buffered events after readyState polling
+- Added `drain_navigation_status()` helper that takes last Document response for a frame (handles redirects)
+- Added `errorText` check on `Page.navigate` result: if navigation fails, record page with `None` status and skip extraction
+- Files changed: `server/packages/sandbox-agent/src/browser_crawl.rs`
+- **Learnings for future iterations:**
+  - `Network.responseReceived` events have `type` field; use `"Document"` to filter for the main navigation response
+  - For redirect chains, the last Document `Network.responseReceived` event has the final status code
+  - `Page.navigate` returns `errorText` (non-empty string) when navigation fails (DNS error, connection refused, etc.)
+  - `mpsc::UnboundedReceiver::try_recv()` is useful for non-blocking drain of buffered events
+  - `file://` URLs don't produce Network events, so status will be `None` - this is correct behavior
+---
+
+## 2026-03-17 - US-032
+- Removed dead `pub async fn cdp_client()` method from BrowserRuntime (browser_runtime.rs:552-564)
+- Method always returned `Err(BrowserProblem::cdp_error("Use with_cdp() to execute CDP commands"))` - no callers existed
+- Grep confirmed zero references to `cdp_client()` method; only the `cdp_client` field on BrowserRuntimeState is used
+- Files changed: `server/packages/sandbox-agent/src/browser_runtime.rs`
+- **Learnings for future iterations:**
+  - When removing methods, grep for the method name across the entire src directory to confirm no callers
+  - The `cdp_client` field on BrowserRuntimeState and the `cdp_client()` method on BrowserRuntime are different things - field is actively used
 ---
