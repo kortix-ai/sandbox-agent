@@ -1,0 +1,264 @@
+use std::collections::{HashSet, VecDeque};
+
+use url::Url;
+
+use crate::browser_cdp::CdpClient;
+use crate::browser_errors::BrowserProblem;
+use crate::browser_types::{
+    BrowserCrawlExtract, BrowserCrawlPage, BrowserCrawlRequest, BrowserCrawlResponse,
+};
+
+/// Perform a BFS crawl starting from the given URL.
+///
+/// Navigates to each page via CDP, extracts content according to the requested
+/// format, collects links, and follows them breadth-first within the configured
+/// domain and depth limits.
+pub async fn crawl_pages(
+    cdp: &CdpClient,
+    request: &BrowserCrawlRequest,
+) -> Result<BrowserCrawlResponse, BrowserProblem> {
+    let max_pages = request.max_pages.unwrap_or(10).min(100) as usize;
+    let max_depth = request.max_depth.unwrap_or(2);
+    let extract = request.extract.unwrap_or(BrowserCrawlExtract::Markdown);
+
+    // Parse the starting URL to determine the default allowed domain.
+    let start_url = Url::parse(&request.url)
+        .map_err(|e| BrowserProblem::cdp_error(format!("Invalid start URL: {e}")))?;
+
+    let allowed_domains: HashSet<String> = if let Some(ref domains) = request.allowed_domains {
+        domains.iter().cloned().collect()
+    } else {
+        // Default: only crawl same domain as start URL.
+        let mut set = HashSet::new();
+        if let Some(host) = start_url.host_str() {
+            set.insert(host.to_string());
+        }
+        set
+    };
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+    let mut pages: Vec<BrowserCrawlPage> = Vec::new();
+
+    queue.push_back((request.url.clone(), 0));
+    visited.insert(normalize_url(&request.url));
+
+    cdp.send("Page.enable", None).await?;
+
+    while let Some((url, depth)) = queue.pop_front() {
+        if pages.len() >= max_pages {
+            break;
+        }
+
+        // Navigate to the page.
+        let nav_result = cdp
+            .send("Page.navigate", Some(serde_json::json!({ "url": url })))
+            .await?;
+
+        let status = nav_result.get("frameId").map(|_| 200u16);
+
+        // Wait for load.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Get page info.
+        let (page_url, title) = get_page_info(cdp).await?;
+
+        // Extract content based on requested mode.
+        let content = extract_content(cdp, extract).await?;
+
+        // Collect links for further crawling.
+        let links = extract_links(cdp).await?;
+
+        pages.push(BrowserCrawlPage {
+            url: page_url,
+            title,
+            content,
+            links: links.clone(),
+            status,
+            depth,
+        });
+
+        // Enqueue discovered links if we haven't reached max depth.
+        if depth < max_depth {
+            for link in &links {
+                let normalized = normalize_url(link);
+                if visited.contains(&normalized) {
+                    continue;
+                }
+                if let Ok(parsed) = Url::parse(link) {
+                    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                        continue;
+                    }
+                    if let Some(host) = parsed.host_str() {
+                        if !allowed_domains.is_empty() && !allowed_domains.contains(host) {
+                            continue;
+                        }
+                    }
+                    visited.insert(normalized);
+                    queue.push_back((link.clone(), depth + 1));
+                }
+            }
+        }
+    }
+
+    let total_pages = pages.len() as u32;
+    let truncated = !queue.is_empty();
+
+    Ok(BrowserCrawlResponse {
+        pages,
+        total_pages,
+        truncated,
+    })
+}
+
+/// Normalize a URL by removing the fragment for deduplication.
+fn normalize_url(url: &str) -> String {
+    if let Ok(mut parsed) = Url::parse(url) {
+        parsed.set_fragment(None);
+        parsed.to_string()
+    } else {
+        url.to_string()
+    }
+}
+
+/// Get the current page URL and title via CDP Runtime.evaluate.
+async fn get_page_info(cdp: &CdpClient) -> Result<(String, String), BrowserProblem> {
+    let url_result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": "document.location.href",
+                "returnByValue": true
+            })),
+        )
+        .await?;
+    let url = url_result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let title_result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": "document.title",
+                "returnByValue": true
+            })),
+        )
+        .await?;
+    let title = title_result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok((url, title))
+}
+
+/// Extract page content according to the requested format.
+async fn extract_content(
+    cdp: &CdpClient,
+    extract: BrowserCrawlExtract,
+) -> Result<String, BrowserProblem> {
+    match extract {
+        BrowserCrawlExtract::Html => {
+            let result = cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(serde_json::json!({
+                        "expression": "document.documentElement.outerHTML",
+                        "returnByValue": true
+                    })),
+                )
+                .await?;
+            Ok(result
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string())
+        }
+        BrowserCrawlExtract::Text => {
+            let result = cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(serde_json::json!({
+                        "expression": "document.body.innerText",
+                        "returnByValue": true
+                    })),
+                )
+                .await?;
+            Ok(result
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string())
+        }
+        BrowserCrawlExtract::Markdown => {
+            let expression = r#"
+                (function() {
+                    var clone = document.body.cloneNode(true);
+                    var selectors = ['nav', 'footer', 'aside', 'header', '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]'];
+                    selectors.forEach(function(sel) {
+                        clone.querySelectorAll(sel).forEach(function(el) { el.remove(); });
+                    });
+                    return clone.innerHTML;
+                })()
+            "#;
+            let result = cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(serde_json::json!({
+                        "expression": expression,
+                        "returnByValue": true
+                    })),
+                )
+                .await?;
+            let html = result
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Ok(html2md::parse_html(html))
+        }
+        BrowserCrawlExtract::Links => {
+            // For "links" extraction, content is empty; links are in the links field.
+            Ok(String::new())
+        }
+    }
+}
+
+/// Extract all http/https links from the current page.
+async fn extract_links(cdp: &CdpClient) -> Result<Vec<String>, BrowserProblem> {
+    let expression = r#"
+        (function() {
+            var links = [];
+            document.querySelectorAll('a[href]').forEach(function(a) {
+                if (a.href && a.href.startsWith('http')) {
+                    links.push(a.href);
+                }
+            });
+            return JSON.stringify(links);
+        })()
+    "#;
+    let result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": expression,
+                "returnByValue": true
+            })),
+        )
+        .await?;
+    let json_str = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("[]");
+    let links: Vec<String> = serde_json::from_str(json_str).unwrap_or_default();
+    Ok(links)
+}

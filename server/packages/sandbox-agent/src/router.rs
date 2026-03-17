@@ -307,6 +307,7 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/browser/dialog", post(post_v1_browser_dialog))
         .route("/browser/console", get(get_v1_browser_console))
         .route("/browser/network", get(get_v1_browser_network))
+        .route("/browser/crawl", post(post_v1_browser_crawl))
         .route(
             "/browser/contexts",
             get(get_v1_browser_contexts).post(post_v1_browser_contexts),
@@ -544,6 +545,7 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         get_v1_browser_cookies,
         post_v1_browser_cookies,
         delete_v1_browser_cookies,
+        post_v1_browser_crawl,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -664,6 +666,10 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserCookiesResponse,
             BrowserSetCookiesRequest,
             BrowserDeleteCookiesQuery,
+            BrowserCrawlRequest,
+            BrowserCrawlExtract,
+            BrowserCrawlPage,
+            BrowserCrawlResponse,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -2973,6 +2979,31 @@ async fn delete_v1_browser_cookies(
     }
 
     Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Crawl multiple pages starting from a URL.
+///
+/// Performs a breadth-first crawl: navigates to each page, extracts content in
+/// the requested format, collects links, and follows them within the configured
+/// domain and depth limits.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/crawl",
+    tag = "v1",
+    request_body = BrowserCrawlRequest,
+    responses(
+        (status = 200, description = "Crawl results", body = BrowserCrawlResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_crawl(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserCrawlRequest>,
+) -> Result<Json<BrowserCrawlResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+    let response = crate::browser_crawl::crawl_pages(&cdp, &body).await?;
+    Ok(Json(response))
 }
 
 /// Helper: get the current page URL and title via CDP Runtime.evaluate.
