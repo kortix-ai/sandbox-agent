@@ -125,6 +125,7 @@ impl AppState {
             process_runtime.clone(),
             desktop_runtime.clone(),
         ));
+        desktop_runtime.set_browser_runtime(browser_runtime.clone());
         Self {
             auth,
             agent_manager,
