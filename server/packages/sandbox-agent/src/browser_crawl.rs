@@ -1,5 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 
+use serde_json::Value;
+use tokio::sync::mpsc;
 use url::Url;
 
 use crate::browser_cdp::CdpClient;
@@ -44,6 +46,8 @@ pub async fn crawl_pages(
     visited.insert(normalize_url(&request.url));
 
     cdp.send("Page.enable", None).await?;
+    cdp.send("Network.enable", None).await?;
+    let mut network_rx = cdp.subscribe("Network.responseReceived").await;
 
     while let Some((url, depth)) = queue.pop_front() {
         if pages.len() >= max_pages {
@@ -55,7 +59,30 @@ pub async fn crawl_pages(
             .send("Page.navigate", Some(serde_json::json!({ "url": url })))
             .await?;
 
-        let status = nav_result.get("frameId").map(|_| 200u16);
+        // If Page.navigate returns an errorText, the navigation failed (e.g. DNS
+        // error, connection refused). Record the page with no status and skip
+        // content/link extraction.
+        let error_text = nav_result
+            .get("errorText")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        if error_text.is_some() {
+            pages.push(BrowserCrawlPage {
+                url,
+                title: String::new(),
+                content: String::new(),
+                links: vec![],
+                status: None,
+                depth,
+            });
+            continue;
+        }
+
+        let frame_id = nav_result
+            .get("frameId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         // Wait for page load by polling document.readyState until "complete".
         // Polls every 100ms with a 10s timeout; proceeds with extraction if timeout reached.
@@ -87,6 +114,12 @@ pub async fn crawl_pages(
             }
             tokio::time::sleep(poll_interval).await;
         }
+
+        // Capture the real HTTP status from Network.responseReceived events.
+        // After readyState is "complete", all document-level network events should
+        // have been buffered. We drain them looking for the last Document response
+        // matching this frame (the last one handles redirects correctly).
+        let status = drain_navigation_status(&mut network_rx, &frame_id);
 
         // Get page info.
         let (page_url, title) = get_page_info(cdp).await?;
@@ -137,6 +170,33 @@ pub async fn crawl_pages(
         total_pages,
         truncated,
     })
+}
+
+/// Drain buffered `Network.responseReceived` events and return the HTTP status
+/// of the last Document-type response matching the given frame ID.
+///
+/// Takes the *last* matching status to handle redirect chains correctly (the
+/// final destination response comes last). Returns `None` for non-HTTP schemes
+/// like `file://` where no network events are emitted.
+fn drain_navigation_status(
+    network_rx: &mut mpsc::UnboundedReceiver<Value>,
+    frame_id: &str,
+) -> Option<u16> {
+    let mut status = None;
+    while let Ok(event) = network_rx.try_recv() {
+        let event_frame = event.get("frameId").and_then(|v| v.as_str()).unwrap_or("");
+        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if event_frame == frame_id && event_type == "Document" {
+            if let Some(s) = event
+                .get("response")
+                .and_then(|r| r.get("status"))
+                .and_then(|s| s.as_u64())
+            {
+                status = Some(s as u16);
+            }
+        }
+    }
+    status
 }
 
 /// Normalize a URL by removing the fragment for deduplication.
