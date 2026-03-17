@@ -560,23 +560,6 @@ impl BrowserRuntime {
         let _ = self.stop().await;
     }
 
-    /// Execute a closure with the CDP client while holding the state lock.
-    pub async fn with_cdp<F, Fut, T>(&self, f: F) -> Result<T, BrowserProblem>
-    where
-        F: FnOnce(&CdpClient) -> Fut,
-        Fut: std::future::Future<Output = Result<T, BrowserProblem>>,
-    {
-        let state = self.inner.lock().await;
-        if state.state != BrowserState::Active {
-            return Err(BrowserProblem::not_active());
-        }
-        let cdp = state
-            .cdp_client
-            .as_ref()
-            .ok_or_else(|| BrowserProblem::cdp_error("CDP client is not connected"))?;
-        f(cdp).await
-    }
-
     /// Get an Arc-wrapped CDP client handle.
     ///
     /// Returns a cloned `Arc<CdpClient>` after verifying the browser is active.
