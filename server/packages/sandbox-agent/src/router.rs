@@ -315,6 +315,12 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
             "/browser/contexts/:context_id",
             delete(delete_v1_browser_context),
         )
+        .route(
+            "/browser/cookies",
+            get(get_v1_browser_cookies)
+                .post(post_v1_browser_cookies)
+                .delete(delete_v1_browser_cookies),
+        )
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -535,6 +541,9 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         get_v1_browser_contexts,
         post_v1_browser_contexts,
         delete_v1_browser_context,
+        get_v1_browser_cookies,
+        post_v1_browser_cookies,
+        delete_v1_browser_cookies,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -649,6 +658,12 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserContextInfo,
             BrowserContextListResponse,
             BrowserContextCreateRequest,
+            BrowserCookie,
+            BrowserCookieSameSite,
+            BrowserCookiesQuery,
+            BrowserCookiesResponse,
+            BrowserSetCookiesRequest,
+            BrowserDeleteCookiesQuery,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -2762,6 +2777,201 @@ async fn delete_v1_browser_context(
     Path(context_id): Path<String>,
 ) -> Result<Json<BrowserActionResponse>, ApiError> {
     crate::browser_context::delete_context(state.browser_runtime().state_dir(), &context_id)?;
+    Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Get browser cookies.
+///
+/// Returns cookies from the browser, optionally filtered by URL.
+/// Uses CDP Network.getCookies.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/cookies",
+    tag = "v1",
+    params(BrowserCookiesQuery),
+    responses(
+        (status = 200, description = "Cookies retrieved", body = BrowserCookiesResponse),
+        (status = 409, description = "Browser not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_cookies(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BrowserCookiesQuery>,
+) -> Result<Json<BrowserCookiesResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let params = match &query.url {
+        Some(url) => Some(serde_json::json!({ "urls": [url] })),
+        None => None,
+    };
+
+    let result = cdp.send("Network.getCookies", params).await?;
+
+    let cdp_cookies = result
+        .get("cookies")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let cookies = cdp_cookies
+        .into_iter()
+        .filter_map(|c| {
+            Some(BrowserCookie {
+                name: c.get("name")?.as_str()?.to_string(),
+                value: c.get("value")?.as_str()?.to_string(),
+                domain: c
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                path: c
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                expires: c
+                    .get("expires")
+                    .and_then(|v| v.as_f64())
+                    .filter(|&e| e > 0.0),
+                http_only: c.get("httpOnly").and_then(|v| v.as_bool()),
+                secure: c.get("secure").and_then(|v| v.as_bool()),
+                same_site: c
+                    .get("sameSite")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| match s {
+                        "Strict" => Some(BrowserCookieSameSite::Strict),
+                        "Lax" => Some(BrowserCookieSameSite::Lax),
+                        "None" => Some(BrowserCookieSameSite::None),
+                        _ => None,
+                    }),
+            })
+        })
+        .collect();
+
+    Ok(Json(BrowserCookiesResponse { cookies }))
+}
+
+/// Set browser cookies.
+///
+/// Sets one or more cookies in the browser via CDP Network.setCookies.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/cookies",
+    tag = "v1",
+    request_body = BrowserSetCookiesRequest,
+    responses(
+        (status = 200, description = "Cookies set", body = BrowserActionResponse),
+        (status = 409, description = "Browser not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_cookies(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserSetCookiesRequest>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let cdp_cookies: Vec<serde_json::Value> = body
+        .cookies
+        .iter()
+        .map(|c| {
+            let mut cookie = serde_json::json!({
+                "name": c.name,
+                "value": c.value,
+            });
+            let obj = cookie.as_object_mut().unwrap();
+            if let Some(ref domain) = c.domain {
+                obj.insert("domain".into(), serde_json::json!(domain));
+            }
+            if let Some(ref path) = c.path {
+                obj.insert("path".into(), serde_json::json!(path));
+            }
+            if let Some(expires) = c.expires {
+                obj.insert("expires".into(), serde_json::json!(expires));
+            }
+            if let Some(http_only) = c.http_only {
+                obj.insert("httpOnly".into(), serde_json::json!(http_only));
+            }
+            if let Some(secure) = c.secure {
+                obj.insert("secure".into(), serde_json::json!(secure));
+            }
+            if let Some(same_site) = &c.same_site {
+                let ss = match same_site {
+                    BrowserCookieSameSite::Strict => "Strict",
+                    BrowserCookieSameSite::Lax => "Lax",
+                    BrowserCookieSameSite::None => "None",
+                };
+                obj.insert("sameSite".into(), serde_json::json!(ss));
+            }
+            cookie
+        })
+        .collect();
+
+    cdp.send(
+        "Network.setCookies",
+        Some(serde_json::json!({ "cookies": cdp_cookies })),
+    )
+    .await?;
+
+    Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Delete browser cookies.
+///
+/// Deletes cookies matching the given name and/or domain. If no filters are
+/// provided, clears all browser cookies.
+#[utoipa::path(
+    delete,
+    path = "/v1/browser/cookies",
+    tag = "v1",
+    params(BrowserDeleteCookiesQuery),
+    responses(
+        (status = 200, description = "Cookies deleted", body = BrowserActionResponse),
+        (status = 409, description = "Browser not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn delete_v1_browser_cookies(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BrowserDeleteCookiesQuery>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    if query.name.is_none() && query.domain.is_none() {
+        // Clear all cookies
+        cdp.send("Network.clearBrowserCookies", None).await?;
+    } else {
+        // Get current cookies, filter matching ones, delete each
+        let result = cdp.send("Network.getCookies", None).await?;
+        let cdp_cookies = result
+            .get("cookies")
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for cookie in &cdp_cookies {
+            let cookie_name = cookie.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let cookie_domain = cookie.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+
+            let name_matches = query.name.as_deref().map_or(true, |n| n == cookie_name);
+            let domain_matches = query
+                .domain
+                .as_deref()
+                .map_or(true, |d| cookie_domain.contains(d));
+
+            if name_matches && domain_matches {
+                let mut params = serde_json::json!({ "name": cookie_name });
+                let obj = params.as_object_mut().unwrap();
+                if !cookie_domain.is_empty() {
+                    obj.insert("domain".into(), serde_json::json!(cookie_domain));
+                }
+                if let Some(path) = cookie.get("path").and_then(|v| v.as_str()) {
+                    obj.insert("path".into(), serde_json::json!(path));
+                }
+                cdp.send("Network.deleteCookies", Some(params)).await?;
+            }
+        }
+    }
+
     Ok(Json(BrowserActionResponse { ok: true }))
 }
 
