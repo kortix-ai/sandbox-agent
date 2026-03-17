@@ -31,10 +31,21 @@ import {
   type AgentInstallResponse,
   type AgentListResponse,
   type BrowserActionResponse,
+  type BrowserContentQuery,
+  type BrowserContentResponse,
   type BrowserCreateTabRequest,
+  type BrowserExecuteRequest,
+  type BrowserExecuteResponse,
+  type BrowserLinksResponse,
+  type BrowserMarkdownResponse,
   type BrowserNavigateRequest,
   type BrowserPageInfo,
+  type BrowserPdfQuery,
   type BrowserReloadRequest,
+  type BrowserScreenshotQuery,
+  type BrowserScrapeRequest,
+  type BrowserScrapeResponse,
+  type BrowserSnapshotResponse,
   type BrowserStartRequest,
   type BrowserStatusResponse,
   type BrowserTabInfo,
@@ -2083,6 +2094,48 @@ export class SandboxAgent {
 
   async closeBrowserTab(tabId: string): Promise<BrowserActionResponse> {
     return this.requestJson("DELETE", `${API_PREFIX}/browser/tabs/${tabId}`);
+  }
+
+  async takeBrowserScreenshot(query: BrowserScreenshotQuery = {}): Promise<Uint8Array> {
+    const response = await this.requestRaw("GET", `${API_PREFIX}/browser/screenshot`, {
+      query,
+      accept: "image/*",
+    });
+    const buffer = await response.arrayBuffer();
+    return new Uint8Array(buffer);
+  }
+
+  async getBrowserPdf(query: BrowserPdfQuery = {}): Promise<Uint8Array> {
+    const response = await this.requestRaw("GET", `${API_PREFIX}/browser/pdf`, {
+      query,
+      accept: "application/pdf",
+    });
+    const buffer = await response.arrayBuffer();
+    return new Uint8Array(buffer);
+  }
+
+  async getBrowserContent(query: BrowserContentQuery = {}): Promise<BrowserContentResponse> {
+    return this.requestJson("GET", `${API_PREFIX}/browser/content`, { query });
+  }
+
+  async getBrowserMarkdown(): Promise<BrowserMarkdownResponse> {
+    return this.requestJson("GET", `${API_PREFIX}/browser/markdown`);
+  }
+
+  async scrapeBrowser(request: BrowserScrapeRequest): Promise<BrowserScrapeResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/scrape`, { body: request });
+  }
+
+  async getBrowserLinks(): Promise<BrowserLinksResponse> {
+    return this.requestJson("GET", `${API_PREFIX}/browser/links`);
+  }
+
+  async executeBrowserScript(request: BrowserExecuteRequest): Promise<BrowserExecuteResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/execute`, { body: request });
+  }
+
+  async getBrowserSnapshot(): Promise<BrowserSnapshotResponse> {
+    return this.requestJson("GET", `${API_PREFIX}/browser/snapshot`);
   }
 
   private async getLiveConnection(agent: string): Promise<LiveAcpConnection> {
