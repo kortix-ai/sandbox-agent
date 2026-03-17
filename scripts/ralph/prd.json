@@ -589,8 +589,8 @@
         "Tests pass"
       ],
       "priority": 36,
-      "passes": false,
-      "notes": "Console and network monitoring have real complexity (background tasks, ring buffers, event correlation) but zero test coverage currently."
+      "passes": true,
+      "notes": "Console test uses HTML page with console.log/error/warn calls, verifies messages captured and level filtering works. Network test verifies navigation generates captured network requests. CDP reports console.warn level as 'warn' not 'warning'. Both tests use 1s sleep for async CDP event capture."
     },
     {
       "id": "US-037",

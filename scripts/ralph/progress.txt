@@ -28,6 +28,7 @@
 - Test helper `write_test_file()` uses `PUT /v1/fs/file?path=...` to write HTML test fixtures into the container
 - `docker/test-agent/Dockerfile` must include chromium + deps (libnss3, libatk-bridge2.0-0, libdrm2, libxcomposite1, libxdamage1, libxrandr2, libgbm1, libasound2, libpangocairo-1.0-0, libgtk-3-0) for browser integration tests
 - `get_page_info_via_cdp()` is a helper fn in router.rs for getting current URL and title via Runtime.evaluate
+- CDP event-based features (console, network monitoring) are captured asynchronously by background tasks; integration tests need ~1s sleep after triggering events before asserting on endpoint results
 - CDP `Page.getNavigationHistory` returns `{currentIndex, entries: [{id, url, title}]}` for back/forward navigation
 - CDP `Page.navigateToHistoryEntry` takes `{entryId}` (the id from history entries, not the index)
 - CDP `Target.getTargets` returns `{targetInfos: [{targetId, url, title, type, ...}]}`; filter `type == "page"` for browser tabs
@@ -638,4 +639,14 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
   - `BrowserProblem::start_failed` should only be used for actual browser startup failures, not generic server-side errors
   - CDP console event `type` field uses "warning" (not "warn") — always normalize to "warn" for consistency with standard log levels
   - When adding new error variants, check existing tests in the module's `#[cfg(test)] mod tests` to ensure they still pass
+---
+
+## 2026-03-17 - US-036
+- Added `v1_browser_console_monitoring` test: writes HTML page with console.log/error/warn calls, navigates to it, verifies messages captured in ring buffer, verifies level filtering via `?level=error` query param
+- Added `v1_browser_network_monitoring` test: navigates to a file:// page, verifies network requests are captured with url, method, and timestamp fields
+- Files changed: server/packages/sandbox-agent/tests/browser_api.rs
+- **Learnings for future iterations:**
+  - CDP console events are captured asynchronously by background tokio tasks; tests need a ~1s sleep after navigation before checking console/network endpoints
+  - CDP reports `console.warn` level as `"warn"` (after US-035 normalization), not `"warning"` — test assertions must match
+  - `file://` URL navigations DO generate `Network.requestWillBeSent` events in Chromium, so network monitoring tests work with local files
 ---
