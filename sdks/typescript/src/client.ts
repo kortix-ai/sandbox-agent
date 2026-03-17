@@ -30,8 +30,17 @@ import {
   type AgentInstallRequest,
   type AgentInstallResponse,
   type AgentListResponse,
+  type BrowserActionResponse,
+  type BrowserCreateTabRequest,
+  type BrowserNavigateRequest,
+  type BrowserPageInfo,
+  type BrowserReloadRequest,
   type BrowserStartRequest,
   type BrowserStatusResponse,
+  type BrowserTabInfo,
+  type BrowserTabListResponse,
+  type BrowserWaitRequest,
+  type BrowserWaitResponse,
   type DesktopActionResponse,
   type DesktopClipboardQuery,
   type DesktopClipboardResponse,
@@ -2030,6 +2039,50 @@ export class SandboxAgent {
         access_token: options.accessToken ?? this.token,
       }),
     );
+  }
+
+  async browserNavigate(request: BrowserNavigateRequest): Promise<BrowserPageInfo> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/navigate`, {
+      body: request,
+    });
+  }
+
+  async browserBack(): Promise<BrowserPageInfo> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/back`);
+  }
+
+  async browserForward(): Promise<BrowserPageInfo> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/forward`);
+  }
+
+  async browserReload(request: BrowserReloadRequest = {}): Promise<BrowserPageInfo> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/reload`, {
+      body: request,
+    });
+  }
+
+  async browserWait(request: BrowserWaitRequest): Promise<BrowserWaitResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/wait`, {
+      body: request,
+    });
+  }
+
+  async getBrowserTabs(): Promise<BrowserTabListResponse> {
+    return this.requestJson("GET", `${API_PREFIX}/browser/tabs`);
+  }
+
+  async createBrowserTab(request: BrowserCreateTabRequest = {}): Promise<BrowserTabInfo> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/tabs`, {
+      body: request,
+    });
+  }
+
+  async activateBrowserTab(tabId: string): Promise<BrowserTabInfo> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/tabs/${tabId}/activate`);
+  }
+
+  async closeBrowserTab(tabId: string): Promise<BrowserActionResponse> {
+    return this.requestJson("DELETE", `${API_PREFIX}/browser/tabs/${tabId}`);
   }
 
   private async getLiveConnection(agent: string): Promise<LiveAcpConnection> {
