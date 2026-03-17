@@ -36,32 +36,37 @@ impl CdpClient {
 
     /// Connect to Chromium's CDP endpoint.
     ///
-    /// Discovers the WebSocket debugger URL via `http://127.0.0.1:9222/json/version`,
-    /// then establishes a persistent WebSocket connection to
-    /// `ws://127.0.0.1:9222/devtools/browser/{id}`.
+    /// Discovers the first open page via `http://127.0.0.1:9222/json/list`
+    /// and connects to its page-level WebSocket debugger URL. This enables
+    /// Page, Runtime, DOM, and other page-level CDP domains. Browser-level
+    /// commands like Target.* also work through page connections.
     pub async fn connect() -> Result<Self, BrowserProblem> {
-        let version_url = format!("http://127.0.0.1:{}/json/version", Self::CDP_PORT);
+        // Connect to the first page endpoint so that Page/Runtime/DOM commands work.
+        // The browser-level endpoint (/devtools/browser/{id}) only supports
+        // browser-level domains like Target and Browser.
+        let list_url = format!("http://127.0.0.1:{}/json/list", Self::CDP_PORT);
 
-        let resp = reqwest::get(&version_url).await.map_err(|e| {
-            BrowserProblem::cdp_error(format!(
-                "failed to reach CDP endpoint at {version_url}: {e}"
-            ))
+        let resp = reqwest::get(&list_url).await.map_err(|e| {
+            BrowserProblem::cdp_error(format!("failed to reach CDP endpoint at {list_url}: {e}"))
         })?;
 
-        let version_info: Value = resp.json().await.map_err(|e| {
-            BrowserProblem::cdp_error(format!("invalid JSON from {version_url}: {e}"))
-        })?;
+        let pages: Vec<Value> = resp
+            .json()
+            .await
+            .map_err(|e| BrowserProblem::cdp_error(format!("invalid JSON from {list_url}: {e}")))?;
 
-        let ws_url = version_info["webSocketDebuggerUrl"]
-            .as_str()
+        let ws_url = pages
+            .iter()
+            .find(|p| p.get("type").and_then(|v| v.as_str()) == Some("page"))
+            .and_then(|p| p.get("webSocketDebuggerUrl").and_then(|v| v.as_str()))
             .ok_or_else(|| {
                 BrowserProblem::cdp_error(
-                    "webSocketDebuggerUrl not found in /json/version response",
+                    "no page target with webSocketDebuggerUrl found in /json/list",
                 )
             })?
             .to_string();
 
-        debug!(ws_url = %ws_url, "connecting to CDP");
+        debug!(ws_url = %ws_url, "connecting to CDP page endpoint");
 
         let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
             .await

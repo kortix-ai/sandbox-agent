@@ -1,0 +1,781 @@
+/// Integration tests for the browser HTTP API.
+///
+/// These tests use docker/test-agent/Dockerfile which includes Chromium and
+/// its dependencies pre-installed.
+///
+/// Run with:
+///   cargo test -p sandbox-agent --test browser_api
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
+use reqwest::{Method, StatusCode};
+use sandbox_agent::router::AuthConfig;
+use serde_json::{json, Value};
+use serial_test::serial;
+
+#[path = "support/docker.rs"]
+mod docker_support;
+use docker_support::TestApp;
+
+async fn send_request(
+    app: &docker_support::DockerApp,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let client = reqwest::Client::new();
+    let mut builder = client.request(method, app.http_url(uri));
+    for (name, value) in headers {
+        let header_name = HeaderName::from_bytes(name.as_bytes()).expect("header name");
+        let header_value = HeaderValue::from_str(value).expect("header value");
+        builder = builder.header(header_name, header_value);
+    }
+
+    let response = if let Some(body) = body {
+        builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .expect("request handled")
+    } else {
+        builder.send().await.expect("request handled")
+    };
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.bytes().await.expect("collect body");
+
+    (status, headers, bytes.to_vec())
+}
+
+async fn send_request_raw(
+    app: &docker_support::DockerApp,
+    method: Method,
+    uri: &str,
+    body: Option<Vec<u8>>,
+    headers: &[(&str, &str)],
+    content_type: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let client = reqwest::Client::new();
+    let mut builder = client.request(method, app.http_url(uri));
+    for (name, value) in headers {
+        let header_name = HeaderName::from_bytes(name.as_bytes()).expect("header name");
+        let header_value = HeaderValue::from_str(value).expect("header value");
+        builder = builder.header(header_name, header_value);
+    }
+
+    let response = if let Some(body) = body {
+        if let Some(content_type) = content_type {
+            builder = builder.header(header::CONTENT_TYPE, content_type);
+        }
+        builder.body(body).send().await.expect("request handled")
+    } else {
+        builder.send().await.expect("request handled")
+    };
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.bytes().await.expect("collect body");
+
+    (status, headers, bytes.to_vec())
+}
+
+fn parse_json(bytes: &[u8]) -> Value {
+    if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(bytes).expect("valid json")
+    }
+}
+
+/// Write a file into the container using the filesystem API.
+async fn write_test_file(app: &docker_support::DockerApp, path: &str, content: &str) {
+    let client = reqwest::Client::new();
+    let response = client
+        .put(app.http_url("/v1/fs/file"))
+        .query(&[("path", path)])
+        .body(content.to_string())
+        .send()
+        .await
+        .expect("write test file");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "failed to write test file at {path}"
+    );
+}
+
+const TEST_HTML: &str = r#"<!DOCTYPE html>
+<html>
+<head><title>Browser Test Page</title></head>
+<body>
+  <h1 id="heading">Hello Browser</h1>
+  <p class="content">Test paragraph</p>
+  <a href="https://example.com">Example Link</a>
+  <button id="btn" onclick="document.getElementById('result').textContent='clicked'">Click Me</button>
+  <input id="input" type="text" value="" />
+  <div id="result"></div>
+</body>
+</html>"#;
+
+const TEST_HTML_PAGE2: &str = r#"<!DOCTYPE html>
+<html>
+<head><title>Page Two</title></head>
+<body><h1>Second Page</h1></body>
+</html>"#;
+
+#[tokio::test]
+#[serial]
+async fn v1_browser_status_reports_install_required_when_chromium_missing() {
+    let temp = tempfile::tempdir().expect("create empty path tempdir");
+    let mut env = BTreeMap::new();
+    env.insert(
+        "PATH".to_string(),
+        temp.path().to_string_lossy().to_string(),
+    );
+
+    let test_app = TestApp::with_options(
+        AuthConfig::disabled(),
+        docker_support::TestAppOptions {
+            env,
+            replace_path: true,
+            ..Default::default()
+        },
+        |_| {},
+    );
+
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/status", None, &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert_eq!(parsed["state"], "install_required");
+    assert!(parsed["missingDependencies"]
+        .as_array()
+        .expect("missingDependencies array")
+        .iter()
+        .any(|value| value
+            .as_str()
+            .map(|s| s.contains("chromium"))
+            .unwrap_or(false)));
+    assert_eq!(
+        parsed["installCommand"],
+        "sandbox-agent install browser --yes"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn v1_browser_lifecycle_and_navigation() {
+    let test_app = TestApp::new(AuthConfig::disabled());
+
+    // -- Status should be inactive before start --
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/status", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert_eq!(parsed["state"], "inactive");
+
+    // -- Start browser (headless) --
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/start",
+        Some(json!({
+            "width": 1280,
+            "height": 720,
+            "headless": true
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected start response: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let parsed = parse_json(&body);
+    assert_eq!(parsed["state"], "active");
+
+    // -- Status should be active --
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/status", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert_eq!(parsed["state"], "active");
+    assert!(parsed["startedAt"].is_string());
+
+    // -- Write test HTML pages --
+    write_test_file(&test_app.app, "/tmp/test-page1.html", TEST_HTML).await;
+    write_test_file(&test_app.app, "/tmp/test-page2.html", TEST_HTML_PAGE2).await;
+
+    // -- Navigate to test page --
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/navigate",
+        Some(json!({ "url": "file:///tmp/test-page1.html" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert!(
+        parsed["url"]
+            .as_str()
+            .unwrap_or("")
+            .contains("test-page1.html"),
+        "expected URL to contain test-page1.html, got: {}",
+        parsed["url"]
+    );
+    assert_eq!(parsed["title"], "Browser Test Page");
+
+    // -- Navigate to second page --
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/navigate",
+        Some(json!({ "url": "file:///tmp/test-page2.html" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert_eq!(parsed["title"], "Page Two");
+
+    // -- Navigate back --
+    let (status, _, body) =
+        send_request(&test_app.app, Method::POST, "/v1/browser/back", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert!(
+        parsed["url"]
+            .as_str()
+            .unwrap_or("")
+            .contains("test-page1.html"),
+        "expected back to return to page1, got: {}",
+        parsed["url"]
+    );
+
+    // -- Navigate forward --
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/forward",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert!(
+        parsed["url"]
+            .as_str()
+            .unwrap_or("")
+            .contains("test-page2.html"),
+        "expected forward to return to page2, got: {}",
+        parsed["url"]
+    );
+
+    // -- Reload --
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/reload",
+        Some(json!({})),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert!(parsed["url"]
+        .as_str()
+        .unwrap_or("")
+        .contains("test-page2.html"));
+
+    // -- Stop browser --
+    let (status, _, body) =
+        send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert_eq!(parsed["state"], "inactive");
+
+    // -- Status should be inactive after stop --
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/status", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(parse_json(&body)["state"], "inactive");
+}
+
+#[tokio::test]
+#[serial]
+async fn v1_browser_tabs_management() {
+    let test_app = TestApp::new(AuthConfig::disabled());
+
+    // Start browser
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/start",
+        Some(json!({ "headless": true })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "start: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // List tabs - should have 1 initial tab
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/tabs", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let tabs = parsed["tabs"].as_array().expect("tabs array");
+    assert!(!tabs.is_empty(), "should have at least 1 tab");
+    let initial_tab_count = tabs.len();
+
+    // Create a new tab
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/tabs",
+        Some(json!({ "url": "about:blank" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let new_tab = parse_json(&body);
+    let new_tab_id = new_tab["id"].as_str().expect("new tab id").to_string();
+    assert!(!new_tab_id.is_empty());
+
+    // List tabs should now show one more
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/tabs", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let tabs = parsed["tabs"].as_array().expect("tabs array");
+    assert_eq!(tabs.len(), initial_tab_count + 1);
+
+    // Activate the new tab
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        &format!("/v1/browser/tabs/{new_tab_id}/activate"),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let activated = parse_json(&body);
+    assert_eq!(activated["id"], new_tab_id);
+
+    // Close the new tab
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::DELETE,
+        &format!("/v1/browser/tabs/{new_tab_id}"),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(parse_json(&body)["ok"], true);
+
+    // List tabs should be back to initial count
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/tabs", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let tabs = parsed["tabs"].as_array().expect("tabs array");
+    assert_eq!(tabs.len(), initial_tab_count);
+
+    // Stop browser
+    let (status, _, _) =
+        send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn v1_browser_screenshots() {
+    let test_app = TestApp::new(AuthConfig::disabled());
+
+    // Start browser
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/start",
+        Some(json!({ "headless": true, "width": 800, "height": 600 })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "start: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // Navigate to a page so there's content
+    write_test_file(&test_app.app, "/tmp/test-screenshot.html", TEST_HTML).await;
+    let (status, _, _) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/navigate",
+        Some(json!({ "url": "file:///tmp/test-screenshot.html" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // PNG screenshot
+    let (status, headers, body) = send_request_raw(
+        &test_app.app,
+        Method::GET,
+        "/v1/browser/screenshot",
+        None,
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("image/png")
+    );
+    assert!(
+        body.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "expected PNG magic bytes"
+    );
+    assert!(body.len() > 100, "screenshot should be non-trivial size");
+
+    // JPEG screenshot
+    let (status, headers, body) = send_request_raw(
+        &test_app.app,
+        Method::GET,
+        "/v1/browser/screenshot?format=jpeg&quality=50",
+        None,
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("image/jpeg")
+    );
+    assert!(body.starts_with(&[0xff, 0xd8, 0xff]), "expected JPEG magic");
+
+    // WebP screenshot
+    let (status, headers, body) = send_request_raw(
+        &test_app.app,
+        Method::GET,
+        "/v1/browser/screenshot?format=webp",
+        None,
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("image/webp")
+    );
+    assert!(body.len() > 100, "webp screenshot should be non-trivial");
+
+    // Stop browser
+    let (status, _, _) =
+        send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn v1_browser_content_extraction() {
+    let test_app = TestApp::new(AuthConfig::disabled());
+
+    // Start browser
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/start",
+        Some(json!({ "headless": true })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "start: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // Navigate to test page
+    write_test_file(&test_app.app, "/tmp/test-content.html", TEST_HTML).await;
+    let (status, _, _) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/navigate",
+        Some(json!({ "url": "file:///tmp/test-content.html" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Get HTML content
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/content", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let html = parsed["html"].as_str().unwrap_or("");
+    assert!(
+        html.contains("Hello Browser"),
+        "HTML should contain heading text"
+    );
+    assert!(
+        html.contains("<button"),
+        "HTML should contain button element"
+    );
+
+    // Get markdown
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::GET,
+        "/v1/browser/markdown",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let markdown = parsed["markdown"].as_str().unwrap_or("");
+    assert!(!markdown.is_empty(), "markdown should not be empty");
+
+    // Get links
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/links", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let links = parsed["links"].as_array().expect("links array");
+    assert!(
+        links
+            .iter()
+            .any(|l| l["href"].as_str().unwrap_or("").contains("example.com")),
+        "should find example.com link"
+    );
+
+    // Get accessibility snapshot
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::GET,
+        "/v1/browser/snapshot",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let snapshot = parsed["snapshot"].as_str().unwrap_or("");
+    assert!(!snapshot.is_empty(), "snapshot should not be empty");
+
+    // Stop browser
+    let (status, _, _) =
+        send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn v1_browser_interaction() {
+    let test_app = TestApp::new(AuthConfig::disabled());
+
+    // Start browser
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/start",
+        Some(json!({ "headless": true })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "start: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // Navigate to test page
+    write_test_file(&test_app.app, "/tmp/test-interact.html", TEST_HTML).await;
+    let (status, _, _) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/navigate",
+        Some(json!({ "url": "file:///tmp/test-interact.html" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Click the button
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/click",
+        Some(json!({ "selector": "#btn" })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "click: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(parse_json(&body)["ok"], true);
+
+    // Verify click effect via execute
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/execute",
+        Some(json!({ "expression": "document.getElementById('result').textContent" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert_eq!(
+        parsed["result"], "clicked",
+        "button click should have updated result div"
+    );
+
+    // Type text into input
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/type",
+        Some(json!({ "selector": "#input", "text": "hello world" })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "type: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(parse_json(&body)["ok"], true);
+
+    // Verify typed text
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/execute",
+        Some(json!({ "expression": "document.getElementById('input').value" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert_eq!(
+        parsed["result"], "hello world",
+        "input should contain typed text"
+    );
+
+    // Stop browser
+    let (status, _, _) =
+        send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn v1_browser_contexts_management() {
+    let test_app = TestApp::new(AuthConfig::disabled());
+
+    // List contexts (should be empty initially)
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::GET,
+        "/v1/browser/contexts",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let initial_count = parsed["contexts"].as_array().expect("contexts array").len();
+
+    // Create a context
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/contexts",
+        Some(json!({ "name": "test-profile" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let ctx = parse_json(&body);
+    let context_id = ctx["id"].as_str().expect("context id").to_string();
+    assert_eq!(ctx["name"], "test-profile");
+    assert!(ctx["createdAt"].is_string());
+
+    // List contexts should show one more
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::GET,
+        "/v1/browser/contexts",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let contexts = parsed["contexts"].as_array().expect("contexts array");
+    assert_eq!(contexts.len(), initial_count + 1);
+    assert!(contexts
+        .iter()
+        .any(|c| c["id"].as_str() == Some(&context_id)));
+
+    // Delete context
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::DELETE,
+        &format!("/v1/browser/contexts/{context_id}"),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(parse_json(&body)["ok"], true);
+
+    // List contexts should be back to initial count
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::GET,
+        "/v1/browser/contexts",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    assert_eq!(
+        parsed["contexts"].as_array().expect("contexts array").len(),
+        initial_count
+    );
+}
