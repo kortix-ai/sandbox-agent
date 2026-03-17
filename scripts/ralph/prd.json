@@ -653,7 +653,7 @@
         "Typecheck passes"
       ],
       "priority": 40,
-      "passes": false,
+      "passes": true,
       "notes": "with_cdp holds the state Mutex for the entire CDP round-trip (up to 30s). Background listener tasks block on the same lock. Currently unused (router uses get_cdp) but it's a public API that invites deadlock bugs."
     },
     {
