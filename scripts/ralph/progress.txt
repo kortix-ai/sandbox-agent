@@ -628,3 +628,14 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
   - Mutual exclusivity checks should be placed BEFORE acquiring the state lock, consistent with BrowserRuntime's pattern
   - `OnceLock` implements Debug and Clone (when T does), so it works with `#[derive(Debug, Clone)]` on the parent struct
 ---
+
+## 2026-03-17 - US-035
+- Added `internal_error` variant to `BrowserProblem` (500 status, `browser/internal-error` code) for filesystem/serialization errors
+- Replaced all 5 `BrowserProblem::start_failed` usages in `browser_context.rs` with `BrowserProblem::internal_error`
+- Fixed misleading comment in `browser_runtime.rs` console event handler: now actually normalizes CDP "warning" level to "warn"
+- Files changed: browser_errors.rs, browser_context.rs, browser_runtime.rs
+- **Learnings for future iterations:**
+  - `BrowserProblem::start_failed` should only be used for actual browser startup failures, not generic server-side errors
+  - CDP console event `type` field uses "warning" (not "warn") — always normalize to "warn" for consistency with standard log levels
+  - When adding new error variants, check existing tests in the module's `#[cfg(test)] mod tests` to ensure they still pass
+---

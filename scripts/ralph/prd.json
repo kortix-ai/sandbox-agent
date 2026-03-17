@@ -572,7 +572,7 @@
         "Typecheck passes"
       ],
       "priority": 35,
-      "passes": false,
+      "passes": true,
       "notes": "BrowserProblem::start_failed (500 status, browser/start-failed code) is used as a catch-all for filesystem errors in browser_context.rs which makes error codes meaningless for API consumers."
     },
     {
