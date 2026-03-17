@@ -31,11 +31,14 @@ import {
   type AgentInstallResponse,
   type AgentListResponse,
   type BrowserActionResponse,
+  type BrowserClickRequest,
   type BrowserContentQuery,
   type BrowserContentResponse,
   type BrowserCreateTabRequest,
+  type BrowserDialogRequest,
   type BrowserExecuteRequest,
   type BrowserExecuteResponse,
+  type BrowserHoverRequest,
   type BrowserLinksResponse,
   type BrowserMarkdownResponse,
   type BrowserNavigateRequest,
@@ -43,13 +46,17 @@ import {
   type BrowserPdfQuery,
   type BrowserReloadRequest,
   type BrowserScreenshotQuery,
+  type BrowserScrollRequest,
   type BrowserScrapeRequest,
   type BrowserScrapeResponse,
+  type BrowserSelectRequest,
   type BrowserSnapshotResponse,
   type BrowserStartRequest,
   type BrowserStatusResponse,
   type BrowserTabInfo,
   type BrowserTabListResponse,
+  type BrowserTypeRequest,
+  type BrowserUploadRequest,
   type BrowserWaitRequest,
   type BrowserWaitResponse,
   type DesktopActionResponse,
@@ -2136,6 +2143,34 @@ export class SandboxAgent {
 
   async getBrowserSnapshot(): Promise<BrowserSnapshotResponse> {
     return this.requestJson("GET", `${API_PREFIX}/browser/snapshot`);
+  }
+
+  async browserClick(request: BrowserClickRequest): Promise<BrowserActionResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/click`, { body: request });
+  }
+
+  async browserType(request: BrowserTypeRequest): Promise<BrowserActionResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/type`, { body: request });
+  }
+
+  async browserSelect(request: BrowserSelectRequest): Promise<BrowserActionResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/select`, { body: request });
+  }
+
+  async browserHover(request: BrowserHoverRequest): Promise<BrowserActionResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/hover`, { body: request });
+  }
+
+  async browserScroll(request: BrowserScrollRequest): Promise<BrowserActionResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/scroll`, { body: request });
+  }
+
+  async browserUpload(request: BrowserUploadRequest): Promise<BrowserActionResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/upload`, { body: request });
+  }
+
+  async browserDialog(request: BrowserDialogRequest): Promise<BrowserActionResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/dialog`, { body: request });
   }
 
   private async getLiveConnection(agent: string): Promise<LiveAcpConnection> {
