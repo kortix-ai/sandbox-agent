@@ -4,6 +4,7 @@ mod acp_proxy_runtime;
 mod browser_cdp;
 mod browser_errors;
 mod browser_install;
+mod browser_runtime;
 pub mod browser_types;
 pub mod cli;
 pub mod daemon;

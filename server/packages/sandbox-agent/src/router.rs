@@ -37,6 +37,7 @@ use tracing::Span;
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 
 use crate::acp_proxy_runtime::{AcpProxyRuntime, ProxyPostOutcome};
+use crate::browser_runtime::BrowserRuntime;
 use crate::desktop_errors::DesktopProblem;
 use crate::desktop_runtime::DesktopRuntime;
 use crate::desktop_types::*;
@@ -92,6 +93,7 @@ pub struct AppState {
     opencode_server_manager: Arc<OpenCodeServerManager>,
     process_runtime: Arc<ProcessRuntime>,
     desktop_runtime: Arc<DesktopRuntime>,
+    browser_runtime: Arc<BrowserRuntime>,
     pub(crate) branding: BrandingMode,
     version_cache: Mutex<HashMap<AgentId, CachedAgentVersion>>,
 }
@@ -117,6 +119,10 @@ impl AppState {
         ));
         let process_runtime = Arc::new(ProcessRuntime::new());
         let desktop_runtime = Arc::new(DesktopRuntime::new(process_runtime.clone()));
+        let browser_runtime = Arc::new(BrowserRuntime::new(
+            process_runtime.clone(),
+            desktop_runtime.clone(),
+        ));
         Self {
             auth,
             agent_manager,
@@ -124,6 +130,7 @@ impl AppState {
             opencode_server_manager,
             process_runtime,
             desktop_runtime,
+            browser_runtime,
             branding,
             version_cache: Mutex::new(HashMap::new()),
         }
@@ -147,6 +154,10 @@ impl AppState {
 
     pub(crate) fn desktop_runtime(&self) -> Arc<DesktopRuntime> {
         self.desktop_runtime.clone()
+    }
+
+    pub(crate) fn browser_runtime(&self) -> Arc<BrowserRuntime> {
+        self.browser_runtime.clone()
     }
 
     pub(crate) fn purge_version_cache(&self, agent: AgentId) {
