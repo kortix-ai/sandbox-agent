@@ -298,6 +298,11 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/browser/snapshot", get(get_v1_browser_snapshot))
         .route("/browser/scrape", post(post_v1_browser_scrape))
         .route("/browser/execute", post(post_v1_browser_execute))
+        .route("/browser/click", post(post_v1_browser_click))
+        .route("/browser/type", post(post_v1_browser_type))
+        .route("/browser/select", post(post_v1_browser_select))
+        .route("/browser/hover", post(post_v1_browser_hover))
+        .route("/browser/scroll", post(post_v1_browser_scroll))
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -506,6 +511,11 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         get_v1_browser_snapshot,
         post_v1_browser_scrape,
         post_v1_browser_execute,
+        post_v1_browser_click,
+        post_v1_browser_type,
+        post_v1_browser_select,
+        post_v1_browser_hover,
+        post_v1_browser_scroll,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -603,6 +613,12 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserScrapeResponse,
             BrowserExecuteRequest,
             BrowserExecuteResponse,
+            BrowserClickRequest,
+            BrowserMouseButton,
+            BrowserTypeRequest,
+            BrowserSelectRequest,
+            BrowserHoverRequest,
+            BrowserScrollRequest,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -2049,6 +2065,448 @@ async fn post_v1_browser_execute(
         result: value,
         type_,
     }))
+}
+
+/// Click an element in the browser page.
+///
+/// Finds the element matching `selector`, computes its center point via
+/// `DOM.getBoxModel`, and dispatches mouse events through `Input.dispatchMouseEvent`.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/click",
+    tag = "v1",
+    request_body = BrowserClickRequest,
+    responses(
+        (status = 200, description = "Click performed", body = BrowserActionResponse),
+        (status = 404, description = "Element not found", body = ProblemDetails),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_click(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserClickRequest>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    cdp.send("DOM.enable", None).await?;
+
+    // Get document root
+    let doc = cdp.send("DOM.getDocument", None).await?;
+    let root_id = doc
+        .get("root")
+        .and_then(|r| r.get("nodeId"))
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+
+    // Find element by selector
+    let qs_result = cdp
+        .send(
+            "DOM.querySelector",
+            Some(serde_json::json!({
+                "nodeId": root_id,
+                "selector": body.selector
+            })),
+        )
+        .await?;
+
+    let node_id = qs_result
+        .get("nodeId")
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+
+    if node_id == 0 {
+        return Err(
+            BrowserProblem::not_found(format!("Element not found: {}", body.selector)).into(),
+        );
+    }
+
+    // Get element box model for center coordinates
+    let box_model = cdp
+        .send(
+            "DOM.getBoxModel",
+            Some(serde_json::json!({ "nodeId": node_id })),
+        )
+        .await?;
+
+    let content = box_model
+        .get("model")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| BrowserProblem::cdp_error("Failed to get element box model".to_string()))?;
+
+    // content is [x1,y1, x2,y2, x3,y3, x4,y4] – compute center
+    let x = content
+        .iter()
+        .step_by(2)
+        .filter_map(|v| v.as_f64())
+        .sum::<f64>()
+        / 4.0;
+    let y = content
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .filter_map(|v| v.as_f64())
+        .sum::<f64>()
+        / 4.0;
+
+    let button = match body.button {
+        Some(BrowserMouseButton::Right) => "right",
+        Some(BrowserMouseButton::Middle) => "middle",
+        _ => "left",
+    };
+    let click_count = body.click_count.unwrap_or(1);
+
+    // Dispatch mousePressed + mouseReleased
+    cdp.send(
+        "Input.dispatchMouseEvent",
+        Some(serde_json::json!({
+            "type": "mousePressed",
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": click_count
+        })),
+    )
+    .await?;
+
+    cdp.send(
+        "Input.dispatchMouseEvent",
+        Some(serde_json::json!({
+            "type": "mouseReleased",
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": click_count
+        })),
+    )
+    .await?;
+
+    Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Type text into a focused element.
+///
+/// Finds the element matching `selector`, focuses it via `DOM.focus`, optionally
+/// clears existing content, then dispatches key events for each character.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/type",
+    tag = "v1",
+    request_body = BrowserTypeRequest,
+    responses(
+        (status = 200, description = "Text typed", body = BrowserActionResponse),
+        (status = 404, description = "Element not found", body = ProblemDetails),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_type(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserTypeRequest>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    cdp.send("DOM.enable", None).await?;
+
+    // Get document root and find element
+    let doc = cdp.send("DOM.getDocument", None).await?;
+    let root_id = doc
+        .get("root")
+        .and_then(|r| r.get("nodeId"))
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+
+    let qs_result = cdp
+        .send(
+            "DOM.querySelector",
+            Some(serde_json::json!({
+                "nodeId": root_id,
+                "selector": body.selector
+            })),
+        )
+        .await?;
+
+    let node_id = qs_result
+        .get("nodeId")
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+
+    if node_id == 0 {
+        return Err(
+            BrowserProblem::not_found(format!("Element not found: {}", body.selector)).into(),
+        );
+    }
+
+    // Focus the element
+    cdp.send("DOM.focus", Some(serde_json::json!({ "nodeId": node_id })))
+        .await?;
+
+    // Clear existing content if requested
+    if body.clear == Some(true) {
+        cdp.send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": format!(
+                    "document.querySelector('{}').value = ''",
+                    body.selector.replace('\'', "\\'")
+                ),
+                "returnByValue": true
+            })),
+        )
+        .await?;
+    }
+
+    // Type each character via Input.dispatchKeyEvent
+    let delay_ms = body.delay.unwrap_or(0);
+    for ch in body.text.chars() {
+        cdp.send(
+            "Input.dispatchKeyEvent",
+            Some(serde_json::json!({
+                "type": "keyDown",
+                "text": ch.to_string()
+            })),
+        )
+        .await?;
+
+        cdp.send(
+            "Input.dispatchKeyEvent",
+            Some(serde_json::json!({
+                "type": "keyUp",
+                "text": ch.to_string()
+            })),
+        )
+        .await?;
+
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+    }
+
+    Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Select an option in a `<select>` element.
+///
+/// Finds the element matching `selector` and sets its value via `Runtime.evaluate`,
+/// then dispatches a `change` event so listeners fire.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/select",
+    tag = "v1",
+    request_body = BrowserSelectRequest,
+    responses(
+        (status = 200, description = "Option selected", body = BrowserActionResponse),
+        (status = 404, description = "Element not found", body = ProblemDetails),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_select(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserSelectRequest>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let escaped_selector = body.selector.replace('\\', "\\\\").replace('\'', "\\'");
+    let escaped_value = body.value.replace('\\', "\\\\").replace('\'', "\\'");
+
+    let expression = format!(
+        r#"(() => {{
+            const el = document.querySelector('{escaped_selector}');
+            if (!el) return 'not_found';
+            el.value = '{escaped_value}';
+            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            return 'ok';
+        }})()"#
+    );
+
+    let result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": expression,
+                "returnByValue": true
+            })),
+        )
+        .await?;
+
+    let value = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("error");
+
+    if value == "not_found" {
+        return Err(
+            BrowserProblem::not_found(format!("Element not found: {}", body.selector)).into(),
+        );
+    }
+
+    Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Hover over an element.
+///
+/// Finds the element matching `selector`, computes its center via `DOM.getBoxModel`,
+/// and dispatches a `mouseMoved` event.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/hover",
+    tag = "v1",
+    request_body = BrowserHoverRequest,
+    responses(
+        (status = 200, description = "Hover performed", body = BrowserActionResponse),
+        (status = 404, description = "Element not found", body = ProblemDetails),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_hover(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserHoverRequest>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    cdp.send("DOM.enable", None).await?;
+
+    let doc = cdp.send("DOM.getDocument", None).await?;
+    let root_id = doc
+        .get("root")
+        .and_then(|r| r.get("nodeId"))
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+
+    let qs_result = cdp
+        .send(
+            "DOM.querySelector",
+            Some(serde_json::json!({
+                "nodeId": root_id,
+                "selector": body.selector
+            })),
+        )
+        .await?;
+
+    let node_id = qs_result
+        .get("nodeId")
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+
+    if node_id == 0 {
+        return Err(
+            BrowserProblem::not_found(format!("Element not found: {}", body.selector)).into(),
+        );
+    }
+
+    let box_model = cdp
+        .send(
+            "DOM.getBoxModel",
+            Some(serde_json::json!({ "nodeId": node_id })),
+        )
+        .await?;
+
+    let content = box_model
+        .get("model")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| BrowserProblem::cdp_error("Failed to get element box model".to_string()))?;
+
+    let x = content
+        .iter()
+        .step_by(2)
+        .filter_map(|v| v.as_f64())
+        .sum::<f64>()
+        / 4.0;
+    let y = content
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .filter_map(|v| v.as_f64())
+        .sum::<f64>()
+        / 4.0;
+
+    cdp.send(
+        "Input.dispatchMouseEvent",
+        Some(serde_json::json!({
+            "type": "mouseMoved",
+            "x": x,
+            "y": y
+        })),
+    )
+    .await?;
+
+    Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Scroll the page or a specific element.
+///
+/// If a `selector` is provided, scrolls that element. Otherwise scrolls the
+/// page window by the given `x` and `y` pixel offsets.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/scroll",
+    tag = "v1",
+    request_body = BrowserScrollRequest,
+    responses(
+        (status = 200, description = "Scroll performed", body = BrowserActionResponse),
+        (status = 404, description = "Element not found", body = ProblemDetails),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_scroll(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserScrollRequest>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let x = body.x.unwrap_or(0);
+    let y = body.y.unwrap_or(0);
+
+    let expression = if let Some(ref selector) = body.selector {
+        let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
+        format!(
+            r#"(() => {{
+                const el = document.querySelector('{escaped}');
+                if (!el) return 'not_found';
+                el.scrollBy({x}, {y});
+                return 'ok';
+            }})()"#
+        )
+    } else {
+        format!(
+            r#"(() => {{
+                window.scrollBy({x}, {y});
+                return 'ok';
+            }})()"#
+        )
+    };
+
+    let result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": expression,
+                "returnByValue": true
+            })),
+        )
+        .await?;
+
+    let value = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("error");
+
+    if value == "not_found" {
+        return Err(BrowserProblem::not_found(format!(
+            "Element not found: {}",
+            body.selector.unwrap_or_default()
+        ))
+        .into());
+    }
+
+    Ok(Json(BrowserActionResponse { ok: true }))
 }
 
 /// Helper: get the current page URL and title via CDP Runtime.evaluate.
