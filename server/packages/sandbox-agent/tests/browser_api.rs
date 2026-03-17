@@ -779,3 +779,196 @@ async fn v1_browser_contexts_management() {
         initial_count
     );
 }
+
+const TEST_HTML_CONSOLE: &str = r#"<!DOCTYPE html>
+<html>
+<head><title>Console Test</title></head>
+<body>
+<script>
+console.log('test-message');
+console.error('test-error');
+console.warn('test-warning');
+</script>
+</body>
+</html>"#;
+
+#[tokio::test]
+#[serial]
+async fn v1_browser_console_monitoring() {
+    let test_app = TestApp::new(AuthConfig::disabled());
+
+    // Start browser
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/start",
+        Some(json!({ "headless": true })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "start: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // Write test page with console calls and navigate to it
+    write_test_file(&test_app.app, "/tmp/test-console.html", TEST_HTML_CONSOLE).await;
+    let (status, _, _) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/navigate",
+        Some(json!({ "url": "file:///tmp/test-console.html" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Wait for CDP events to be captured by background tasks
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Get all console messages
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/console", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let messages = parsed["messages"].as_array().expect("messages array");
+
+    // Verify we captured the console.log message
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["text"].as_str() == Some("test-message")
+                && m["level"].as_str() == Some("log")),
+        "should contain console.log('test-message'), got: {messages:?}"
+    );
+
+    // Verify we captured the console.error message
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["text"].as_str() == Some("test-error")
+                && m["level"].as_str() == Some("error")),
+        "should contain console.error('test-error'), got: {messages:?}"
+    );
+
+    // Verify we captured the console.warn message (CDP reports level as "warn")
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["text"].as_str() == Some("test-warning")
+                && m["level"].as_str() == Some("warn")),
+        "should contain console.warn('test-warning'), got: {messages:?}"
+    );
+
+    // Filter by level=error - should only return error messages
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::GET,
+        "/v1/browser/console?level=error",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let messages = parsed["messages"].as_array().expect("messages array");
+    assert!(
+        !messages.is_empty(),
+        "should have at least one error message"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|m| m["level"].as_str() == Some("error")),
+        "all messages should be error level when filtered, got: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["text"].as_str() == Some("test-error")),
+        "should contain 'test-error' message"
+    );
+
+    // Stop browser
+    let (status, _, _) =
+        send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+const TEST_HTML_NETWORK: &str = r#"<!DOCTYPE html>
+<html>
+<head><title>Network Test</title></head>
+<body>
+<p>Network test page</p>
+</body>
+</html>"#;
+
+#[tokio::test]
+#[serial]
+async fn v1_browser_network_monitoring() {
+    let test_app = TestApp::new(AuthConfig::disabled());
+
+    // Start browser
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/start",
+        Some(json!({ "headless": true })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "start: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // Write and navigate to a test page to generate network activity
+    write_test_file(&test_app.app, "/tmp/test-network.html", TEST_HTML_NETWORK).await;
+    let (status, _, _) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/navigate",
+        Some(json!({ "url": "file:///tmp/test-network.html" })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Wait for CDP network events to be captured
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Get network requests
+    let (status, _, body) =
+        send_request(&test_app.app, Method::GET, "/v1/browser/network", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let requests = parsed["requests"].as_array().expect("requests array");
+    assert!(
+        !requests.is_empty(),
+        "should have captured at least one network request from page navigation"
+    );
+
+    // Verify request entries have expected fields
+    let first = &requests[0];
+    assert!(
+        first["url"].as_str().is_some() && !first["url"].as_str().unwrap().is_empty(),
+        "request should have a url"
+    );
+    assert!(
+        first["method"].as_str().is_some(),
+        "request should have a method"
+    );
+    assert!(
+        first["timestamp"].as_str().is_some(),
+        "request should have a timestamp"
+    );
+
+    // Stop browser
+    let (status, _, _) =
+        send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+}
