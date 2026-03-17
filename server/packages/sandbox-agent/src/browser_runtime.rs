@@ -899,11 +899,8 @@ impl BrowserRuntime {
 
         // Set user-data-dir for persistent contexts
         if let Some(ref context_id) = state.context_id {
-            let context_dir = self
-                .config
-                .state_dir
-                .join("browser-contexts")
-                .join(context_id);
+            let base = crate::browser_context::contexts_base_dir(&self.config.state_dir);
+            let context_dir = crate::browser_context::validate_context_id(&base, context_id)?;
             args.push(format!("--user-data-dir={}", context_dir.display()));
         }
 
