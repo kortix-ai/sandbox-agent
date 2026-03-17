@@ -292,6 +292,10 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/browser/tabs/:tab_id", delete(delete_v1_browser_tab))
         .route("/browser/screenshot", get(get_v1_browser_screenshot))
         .route("/browser/pdf", get(get_v1_browser_pdf))
+        .route("/browser/content", get(get_v1_browser_content))
+        .route("/browser/markdown", get(get_v1_browser_markdown))
+        .route("/browser/links", get(get_v1_browser_links))
+        .route("/browser/snapshot", get(get_v1_browser_snapshot))
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -494,6 +498,10 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         delete_v1_browser_tab,
         get_v1_browser_screenshot,
         get_v1_browser_pdf,
+        get_v1_browser_content,
+        get_v1_browser_markdown,
+        get_v1_browser_links,
+        get_v1_browser_snapshot,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -581,6 +589,12 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserScreenshotFormat,
             BrowserPdfQuery,
             BrowserPdfFormat,
+            BrowserContentQuery,
+            BrowserContentResponse,
+            BrowserMarkdownResponse,
+            BrowserLinkInfo,
+            BrowserLinksResponse,
+            BrowserSnapshotResponse,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -1661,6 +1675,237 @@ async fn get_v1_browser_pdf(
         Bytes::from(bytes),
     )
         .into_response())
+}
+
+/// Get the HTML content of the current browser page.
+///
+/// Returns the outerHTML of the page or a specific element selected by a CSS
+/// selector, along with the current URL and title.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/content",
+    tag = "v1",
+    params(BrowserContentQuery),
+    responses(
+        (status = 200, description = "Page HTML content", body = BrowserContentResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_content(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BrowserContentQuery>,
+) -> Result<Json<BrowserContentResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+    let (url, title) = get_page_info_via_cdp(&cdp).await?;
+
+    let expression = if let Some(ref selector) = query.selector {
+        let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
+        format!(
+            "(function() {{ var el = document.querySelector('{}'); return el ? el.outerHTML : null; }})()",
+            escaped
+        )
+    } else {
+        "document.documentElement.outerHTML".to_string()
+    };
+
+    let result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": expression,
+                "returnByValue": true
+            })),
+        )
+        .await?;
+
+    let html = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if query.selector.is_some() && html.is_empty() {
+        return Err(BrowserProblem::not_found(&format!(
+            "Element not found: {}",
+            query.selector.as_deref().unwrap_or("")
+        ))
+        .into());
+    }
+
+    Ok(Json(BrowserContentResponse { html, url, title }))
+}
+
+/// Get the page content as Markdown.
+///
+/// Extracts the DOM HTML via CDP, strips navigation/footer/aside elements, and
+/// converts the remaining content to Markdown using html2md.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/markdown",
+    tag = "v1",
+    responses(
+        (status = 200, description = "Page content as Markdown", body = BrowserMarkdownResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_markdown(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BrowserMarkdownResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+    let (url, title) = get_page_info_via_cdp(&cdp).await?;
+
+    // Extract body HTML with nav/footer/aside stripped out
+    let expression = r#"
+        (function() {
+            var clone = document.body.cloneNode(true);
+            var selectors = ['nav', 'footer', 'aside', 'header', '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]'];
+            selectors.forEach(function(sel) {
+                clone.querySelectorAll(sel).forEach(function(el) { el.remove(); });
+            });
+            return clone.innerHTML;
+        })()
+    "#;
+
+    let result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": expression,
+                "returnByValue": true
+            })),
+        )
+        .await?;
+
+    let html = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let markdown = html2md::parse_html(html);
+
+    Ok(Json(BrowserMarkdownResponse {
+        markdown,
+        url,
+        title,
+    }))
+}
+
+/// Get all links on the current page.
+///
+/// Extracts all anchor elements from the page via CDP and returns their href
+/// and text content.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/links",
+    tag = "v1",
+    responses(
+        (status = 200, description = "Links on the page", body = BrowserLinksResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_links(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BrowserLinksResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+    let (url, _title) = get_page_info_via_cdp(&cdp).await?;
+
+    let expression = r#"
+        (function() {
+            var links = [];
+            document.querySelectorAll('a[href]').forEach(function(a) {
+                links.push({ href: a.href, text: (a.textContent || '').trim() });
+            });
+            return JSON.stringify(links);
+        })()
+    "#;
+
+    let result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": expression,
+                "returnByValue": true
+            })),
+        )
+        .await?;
+
+    let json_str = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("[]");
+
+    let links: Vec<BrowserLinkInfo> = serde_json::from_str(json_str).unwrap_or_default();
+
+    Ok(Json(BrowserLinksResponse { links, url }))
+}
+
+/// Get an accessibility tree snapshot of the current page.
+///
+/// Returns a text representation of the page accessibility tree via CDP
+/// `Accessibility.getFullAXTree`.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/snapshot",
+    tag = "v1",
+    responses(
+        (status = 200, description = "Accessibility tree snapshot", body = BrowserSnapshotResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_snapshot(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BrowserSnapshotResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+    let (url, title) = get_page_info_via_cdp(&cdp).await?;
+
+    let result = cdp.send("Accessibility.getFullAXTree", None).await?;
+
+    // Format the AX tree into a readable text snapshot
+    let nodes = result
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut snapshot = String::new();
+    for node in &nodes {
+        let role = node
+            .get("role")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let name = node
+            .get("name")
+            .and_then(|n| n.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if role == "none" || role == "GenericContainer" || (role.is_empty() && name.is_empty()) {
+            continue;
+        }
+
+        if !snapshot.is_empty() {
+            snapshot.push('\n');
+        }
+        if name.is_empty() {
+            snapshot.push_str(role);
+        } else {
+            snapshot.push_str(&format!("{}: {}", role, name));
+        }
+    }
+
+    Ok(Json(BrowserSnapshotResponse {
+        snapshot,
+        url,
+        title,
+    }))
 }
 
 /// Helper: get the current page URL and title via CDP Runtime.evaluate.
