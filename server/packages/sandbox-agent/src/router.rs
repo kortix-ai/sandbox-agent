@@ -281,6 +281,15 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/browser/forward", post(post_v1_browser_forward))
         .route("/browser/reload", post(post_v1_browser_reload))
         .route("/browser/wait", post(post_v1_browser_wait))
+        .route(
+            "/browser/tabs",
+            get(get_v1_browser_tabs).post(post_v1_browser_tabs),
+        )
+        .route(
+            "/browser/tabs/:tab_id/activate",
+            post(post_v1_browser_tab_activate),
+        )
+        .route("/browser/tabs/:tab_id", delete(delete_v1_browser_tab))
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -477,6 +486,10 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         post_v1_browser_forward,
         post_v1_browser_reload,
         post_v1_browser_wait,
+        get_v1_browser_tabs,
+        post_v1_browser_tabs,
+        post_v1_browser_tab_activate,
+        delete_v1_browser_tab,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -556,6 +569,10 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserWaitRequest,
             BrowserWaitState,
             BrowserWaitResponse,
+            BrowserTabInfo,
+            BrowserTabListResponse,
+            BrowserCreateTabRequest,
+            BrowserActionResponse,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -1224,6 +1241,266 @@ async fn post_v1_browser_wait(
 
         tokio::time::sleep(poll_interval).await;
     }
+}
+
+/// List open browser tabs.
+///
+/// Returns all open browser tabs (pages) via CDP `Target.getTargets`,
+/// filtered to type "page".
+#[utoipa::path(
+    get,
+    path = "/v1/browser/tabs",
+    tag = "v1",
+    responses(
+        (status = 200, description = "List of open browser tabs", body = BrowserTabListResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_tabs(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BrowserTabListResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let result = cdp.send("Target.getTargets", None).await?;
+    let targets = result
+        .get("targetInfos")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Get the currently focused target to determine active tab
+    let active_target_id = {
+        let history = cdp.send("Page.getNavigationHistory", None).await.ok();
+        // The page-level commands operate on the currently attached target,
+        // so we use Target.getTargets and check which target is the one
+        // with the current page's URL to determine the active tab.
+        history.and_then(|h| {
+            let idx = h.get("currentIndex").and_then(|v| v.as_i64())? as usize;
+            let entries = h.get("entries").and_then(|v| v.as_array())?;
+            entries
+                .get(idx)
+                .and_then(|e| e.get("url").and_then(|v| v.as_str()))
+                .map(|s| s.to_string())
+        })
+    };
+
+    let tabs: Vec<BrowserTabInfo> = targets
+        .iter()
+        .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+        .map(|t| {
+            let id = t
+                .get("targetId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = t
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let title = t
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let active = active_target_id
+                .as_deref()
+                .map(|active_url| active_url == url)
+                .unwrap_or(false);
+            BrowserTabInfo {
+                id,
+                url,
+                title,
+                active,
+            }
+        })
+        .collect();
+
+    Ok(Json(BrowserTabListResponse { tabs }))
+}
+
+/// Create a new browser tab.
+///
+/// Opens a new tab via CDP `Target.createTarget` and returns the tab info.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/tabs",
+    tag = "v1",
+    request_body = BrowserCreateTabRequest,
+    responses(
+        (status = 201, description = "New tab created", body = BrowserTabInfo),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_tabs(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserCreateTabRequest>,
+) -> Result<(StatusCode, Json<BrowserTabInfo>), ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let url = body.url.unwrap_or_else(|| "about:blank".to_string());
+    let result = cdp
+        .send(
+            "Target.createTarget",
+            Some(serde_json::json!({ "url": url })),
+        )
+        .await?;
+
+    let target_id = result
+        .get("targetId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Give the page a moment to start loading
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Get target info for the newly created tab
+    let targets_result = cdp.send("Target.getTargets", None).await?;
+    let targets = targets_result
+        .get("targetInfos")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let tab_info = targets
+        .iter()
+        .find(|t| t.get("targetId").and_then(|v| v.as_str()) == Some(&target_id));
+
+    let (tab_url, tab_title) = tab_info
+        .map(|t| {
+            let u = t
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let ti = t
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            (u, ti)
+        })
+        .unwrap_or_else(|| (url, String::new()));
+
+    Ok((
+        StatusCode::CREATED,
+        Json(BrowserTabInfo {
+            id: target_id,
+            url: tab_url,
+            title: tab_title,
+            active: false,
+        }),
+    ))
+}
+
+/// Activate a browser tab.
+///
+/// Brings the specified tab to the foreground via CDP `Target.activateTarget`.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/tabs/{tab_id}/activate",
+    tag = "v1",
+    params(
+        ("tab_id" = String, Path, description = "Target ID of the tab to activate")
+    ),
+    responses(
+        (status = 200, description = "Tab activated", body = BrowserTabInfo),
+        (status = 404, description = "Tab not found", body = ProblemDetails),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_tab_activate(
+    State(state): State<Arc<AppState>>,
+    Path(tab_id): Path<String>,
+) -> Result<Json<BrowserTabInfo>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    // Verify the target exists first
+    let targets_result = cdp.send("Target.getTargets", None).await?;
+    let targets = targets_result
+        .get("targetInfos")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let target = targets
+        .iter()
+        .find(|t| t.get("targetId").and_then(|v| v.as_str()) == Some(&tab_id));
+
+    let target = match target {
+        Some(t) => t.clone(),
+        None => return Err(BrowserProblem::not_found(&format!("Tab {} not found", tab_id)).into()),
+    };
+
+    cdp.send(
+        "Target.activateTarget",
+        Some(serde_json::json!({ "targetId": tab_id })),
+    )
+    .await?;
+
+    let url = target
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let title = target
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(Json(BrowserTabInfo {
+        id: tab_id,
+        url,
+        title,
+        active: true,
+    }))
+}
+
+/// Close a browser tab.
+///
+/// Closes the specified tab via CDP `Target.closeTarget`.
+#[utoipa::path(
+    delete,
+    path = "/v1/browser/tabs/{tab_id}",
+    tag = "v1",
+    params(
+        ("tab_id" = String, Path, description = "Target ID of the tab to close")
+    ),
+    responses(
+        (status = 200, description = "Tab closed", body = BrowserActionResponse),
+        (status = 404, description = "Tab not found", body = ProblemDetails),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn delete_v1_browser_tab(
+    State(state): State<Arc<AppState>>,
+    Path(tab_id): Path<String>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let result = cdp
+        .send(
+            "Target.closeTarget",
+            Some(serde_json::json!({ "targetId": tab_id })),
+        )
+        .await?;
+
+    let success = result
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if !success {
+        return Err(BrowserProblem::not_found(&format!("Tab {} not found", tab_id)).into());
+    }
+
+    Ok(Json(BrowserActionResponse { ok: true }))
 }
 
 /// Helper: get the current page URL and title via CDP Runtime.evaluate.
