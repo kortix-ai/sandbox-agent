@@ -307,6 +307,14 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/browser/dialog", post(post_v1_browser_dialog))
         .route("/browser/console", get(get_v1_browser_console))
         .route("/browser/network", get(get_v1_browser_network))
+        .route(
+            "/browser/contexts",
+            get(get_v1_browser_contexts).post(post_v1_browser_contexts),
+        )
+        .route(
+            "/browser/contexts/:context_id",
+            delete(delete_v1_browser_context),
+        )
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -524,6 +532,9 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         post_v1_browser_dialog,
         get_v1_browser_console,
         get_v1_browser_network,
+        get_v1_browser_contexts,
+        post_v1_browser_contexts,
+        delete_v1_browser_context,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -635,6 +646,9 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserNetworkQuery,
             BrowserNetworkRequest,
             BrowserNetworkResponse,
+            BrowserContextInfo,
+            BrowserContextListResponse,
+            BrowserContextCreateRequest,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -2682,6 +2696,73 @@ async fn get_v1_browser_network(
         .network_requests(query.url_pattern.as_deref(), query.limit)
         .await;
     Ok(Json(BrowserNetworkResponse { requests }))
+}
+
+/// List browser contexts (persistent profiles).
+///
+/// Returns all browser context directories with their name, creation date,
+/// and on-disk size.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/contexts",
+    tag = "v1",
+    responses(
+        (status = 200, description = "Browser contexts listed", body = BrowserContextListResponse),
+        (status = 500, description = "Internal error", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_contexts(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BrowserContextListResponse>, ApiError> {
+    let contexts = crate::browser_context::list_contexts(state.browser_runtime().state_dir())?;
+    Ok(Json(BrowserContextListResponse { contexts }))
+}
+
+/// Create a browser context (persistent profile).
+///
+/// Creates a new browser context directory that can be passed as contextId
+/// to the browser start endpoint for persistent cookies and storage.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/contexts",
+    tag = "v1",
+    request_body = BrowserContextCreateRequest,
+    responses(
+        (status = 201, description = "Browser context created", body = BrowserContextInfo),
+        (status = 500, description = "Internal error", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_contexts(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserContextCreateRequest>,
+) -> Result<(StatusCode, Json<BrowserContextInfo>), ApiError> {
+    let info = crate::browser_context::create_context(state.browser_runtime().state_dir(), body)?;
+    Ok((StatusCode::CREATED, Json(info)))
+}
+
+/// Delete a browser context (persistent profile).
+///
+/// Removes the browser context directory and all stored data (cookies,
+/// local storage, cache, etc.).
+#[utoipa::path(
+    delete,
+    path = "/v1/browser/contexts/{context_id}",
+    tag = "v1",
+    params(
+        ("context_id" = String, Path, description = "Browser context ID")
+    ),
+    responses(
+        (status = 200, description = "Browser context deleted", body = BrowserActionResponse),
+        (status = 404, description = "Browser context not found", body = ProblemDetails),
+        (status = 500, description = "Internal error", body = ProblemDetails)
+    )
+)]
+async fn delete_v1_browser_context(
+    State(state): State<Arc<AppState>>,
+    Path(context_id): Path<String>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    crate::browser_context::delete_context(state.browser_runtime().state_dir(), &context_id)?;
+    Ok(Json(BrowserActionResponse { ok: true }))
 }
 
 /// Helper: get the current page URL and title via CDP Runtime.evaluate.

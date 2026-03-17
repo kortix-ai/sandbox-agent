@@ -263,8 +263,8 @@
         "Typecheck passes"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Context CRUD is pure filesystem operations (no browser needed to be active). IDs are hex-encoded random bytes (no uuid dependency). context.json metadata file stores name+createdAt per context directory. contextId integration in browser start was already implemented in US-005."
     },
     {
       "id": "US-017",

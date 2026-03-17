@@ -41,6 +41,8 @@
 - CDP `Page.handleJavaScriptDialog` takes `{accept, promptText?}` for alert/confirm/prompt handling; no DOM setup needed
 - CDP event monitoring pattern: `Runtime.enable` + `Network.enable` in start(), subscribe via `cdp.subscribe(event)`, spawn tokio tasks to populate ring buffers; tasks auto-terminate when CDP connection closes
 - For internal-only fields in API types, use `#[serde(default, skip_serializing)]` to keep them out of JSON responses
+- Browser context management is pure filesystem CRUD; each context is a directory under `{state_dir}/browser-contexts/{id}/` with a `context.json` metadata file
+- Use hex-encoded /dev/urandom bytes for generating IDs (same pattern as telemetry.rs) to avoid adding new crate deps
 
 # Ralph Progress Log
 Started: Tue Mar 17 04:32:06 AM PDT 2026
@@ -287,4 +289,22 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
   - CDP `Network.responseReceived` params: `{requestId, response: {status, mimeType, encodedDataLength}}` - find matching request in ring buffer by requestId
   - Background tokio::spawn tasks for event processing don't need explicit cleanup; they terminate when CDP subscription channel closes (on browser stop)
   - Added internal `request_id` field with `#[serde(skip_serializing)]` to keep it out of API responses while enabling request/response correlation
+---
+
+## 2026-03-17 - US-016
+- Created `browser_context.rs` with context management functions: list_contexts, create_context, delete_context
+- Each context stored as a directory under `{state_dir}/browser-contexts/{id}/` with a `context.json` metadata file
+- Added `state_dir()` accessor to `BrowserRuntime` to expose the state directory path
+- Added 3 HTTP endpoints in router.rs: GET /v1/browser/contexts, POST /v1/browser/contexts (201), DELETE /v1/browser/contexts/:context_id
+- Registered `mod browser_context` in lib.rs
+- OpenAPI paths and schemas registered for all 3 endpoints and context types
+- contextId integration in POST /v1/browser/start was already implemented in US-005 (sets --user-data-dir)
+- 3 unit tests pass (create+list, delete, delete-nonexistent)
+- Files changed: browser_context.rs (new), browser_runtime.rs, router.rs, lib.rs, prd.json
+- **Learnings for future iterations:**
+  - Context management is pure filesystem operations; no browser needs to be running
+  - Use hex-encoded random bytes from /dev/urandom for IDs to avoid adding uuid dependency (same pattern as telemetry.rs)
+  - `BrowserRuntime.config.state_dir` was private; added `state_dir()` pub accessor for context module access
+  - Context types (BrowserContextInfo, BrowserContextListResponse, BrowserContextCreateRequest) were already defined in browser_types.rs from US-003
+  - `tempfile` crate is a workspace dev-dependency available via `test-utils` feature flag
 ---

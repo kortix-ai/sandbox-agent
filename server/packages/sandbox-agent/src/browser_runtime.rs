@@ -637,6 +637,11 @@ impl BrowserRuntime {
         &self.streaming_manager
     }
 
+    /// Return the state directory used for browser data (contexts, logs, etc.).
+    pub fn state_dir(&self) -> &Path {
+        &self.config.state_dir
+    }
+
     /// Push a console message into the ring buffer.
     pub async fn push_console_message(&self, message: BrowserConsoleMessage) {
         let mut state = self.inner.lock().await;
