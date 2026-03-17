@@ -608,6 +608,100 @@
       "priority": 37,
       "passes": true,
       "notes": "Crawl test uses 3 linked file:// HTML pages to verify BFS traversal, depth tracking, text extraction, totalPages, and truncated flag. Required fixing extract_links to also collect file:// links and the scheme filter to allow file:// URLs. Also fixed truncated detection bug: popped URL was lost when max_pages was reached."
+    },
+    {
+      "id": "US-038",
+      "title": "Fix path traversal vulnerability in browser context_id",
+      "description": "As a developer, I need to prevent path traversal attacks via context_id in browser context endpoints and browser start.",
+      "acceptanceCriteria": [
+        "In browser_context.rs delete_context(), validate that context_id matches regex ^[a-f0-9]+$ before constructing the path. Return BrowserProblem::not_found if it contains invalid characters",
+        "In browser_context.rs, after constructing context_dir via base.join(context_id), canonicalize the path and verify it starts with the base directory. Return BrowserProblem::not_found if it escapes",
+        "In browser_runtime.rs start_chromium_locked(), apply the same validation to context_id before using it in --user-data-dir",
+        "Add unit test: delete_context with context_id '../../../tmp' returns error",
+        "Add unit test: delete_context with context_id '..%2F..%2Ftmp' returns error",
+        "Add unit test: delete_context with valid hex context_id that doesn't exist returns not_found (existing behavior preserved)",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 38,
+      "passes": true,
+      "notes": "CRITICAL security issue. context_id from user input is passed directly to fs::remove_dir_all(base.join(context_id)) and to --user-data-dir with no sanitization. DELETE /v1/browser/contexts/..%2F..%2Fetc could delete arbitrary directories."
+    },
+    {
+      "id": "US-039",
+      "title": "Fix leaked background tasks on browser stop",
+      "description": "As a developer, I need background CDP listener tasks to be cancelled when the browser stops.",
+      "acceptanceCriteria": [
+        "Store the JoinHandles for the 3 spawned CDP listener tasks (console, network request, network response) in BrowserRuntimeStateData",
+        "In stop(), abort all 3 JoinHandles before closing the CDP client",
+        "Alternatively, use a tokio CancellationToken: create one in start(), pass it to each spawned task, trigger it in stop()",
+        "Verify that after stop(), no background tasks hold Arc<Mutex<BrowserRuntimeStateData>> references",
+        "Typecheck passes"
+      ],
+      "priority": 39,
+      "passes": false,
+      "notes": "Currently 3 tokio::spawn tasks are created in start() (lines ~300-455) but never cancelled in stop(). Each start/stop cycle leaks 3 zombie tasks holding Arc references to the state."
+    },
+    {
+      "id": "US-040",
+      "title": "Remove with_cdp method from BrowserRuntime",
+      "description": "As a developer, I want to remove the with_cdp method that holds the Mutex across CDP I/O to prevent future deadlock bugs.",
+      "acceptanceCriteria": [
+        "Remove the pub async fn with_cdp() method from BrowserRuntime in browser_runtime.rs",
+        "Search the codebase for any callers of with_cdp and migrate them to get_cdp()",
+        "If no callers exist, simply remove the method",
+        "Typecheck passes"
+      ],
+      "priority": 40,
+      "passes": false,
+      "notes": "with_cdp holds the state Mutex for the entire CDP round-trip (up to 30s). Background listener tasks block on the same lock. Currently unused (router uses get_cdp) but it's a public API that invites deadlock bugs."
+    },
+    {
+      "id": "US-041",
+      "title": "Restrict crawl endpoint to http/https schemes only",
+      "description": "As a developer, I need the crawl endpoint to reject file:// URLs to prevent local filesystem reading.",
+      "acceptanceCriteria": [
+        "In browser_crawl.rs crawl_pages(), validate the start URL scheme is http or https. Return BrowserProblem with 400 status if it is file:// or any other scheme",
+        "In the link filtering logic inside the crawl loop, remove 'file' from the allowed schemes list so only http and https links are followed",
+        "In extract_links(), remove the file: prefix from the href collection filter so only http/https links are collected",
+        "Update the crawl integration test (v1_browser_crawl) to use a local HTTP server inside the container instead of file:// URLs. Use the process API or write a simple HTML file served via python3 -m http.server or similar",
+        "Add a test that POST /v1/browser/crawl with a file:// URL returns 400",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 41,
+      "passes": false,
+      "notes": "SECURITY: file:// URLs combined with --no-sandbox Chromium lets anyone read arbitrary files via the crawl endpoint. The crawl link filter explicitly allows file:// scheme and extract_links collects file: hrefs."
+    },
+    {
+      "id": "US-042",
+      "title": "Handle CDP connection death on Chromium crash",
+      "description": "As a developer, I need the browser state machine to detect and handle a dead CDP connection.",
+      "acceptanceCriteria": [
+        "Store the CdpClient reader_task JoinHandle accessibly (e.g. add a method is_alive() on CdpClient that checks if the reader task has finished)",
+        "In BrowserRuntime refresh_status_locked(), check if the CDP client's reader task is still alive. If not, transition state to Failed with an appropriate error message",
+        "Change Chromium's RestartPolicy from Always to Never so that a crash transitions cleanly to Failed state instead of auto-restarting with a stale CDP connection",
+        "Typecheck passes"
+      ],
+      "priority": 42,
+      "passes": false,
+      "notes": "If Chromium crashes, RestartPolicy::Always restarts it but the CdpClient holds a dead WebSocket. State stays Active but all CDP operations fail. No recovery without manual stop+start."
+    },
+    {
+      "id": "US-043",
+      "title": "Strengthen network monitoring integration test",
+      "description": "As a developer, I need the network monitoring test to actually verify captured request data, not just field existence.",
+      "acceptanceCriteria": [
+        "Rewrite v1_browser_network_monitoring to use a test HTML page that triggers a real HTTP request (e.g. an XHR/fetch to a known URL, or navigate to an HTTP URL served by python3 -m http.server inside the container)",
+        "Assert that at least one captured network request has a url containing the expected path",
+        "Assert that the captured request has method 'GET'",
+        "Assert that the captured request has a status field with value 200",
+        "Replace the fixed 1-second sleep with a retry loop (poll GET /v1/browser/network every 200ms for up to 5s until expected entries appear)",
+        "Tests pass"
+      ],
+      "priority": 43,
+      "passes": false,
+      "notes": "Current test only checks fields exist (is_some/is_empty), never checks values. Uses file:// which may not generate real Network events. Graded D+ by adversarial review. status field from the user story requirement is never verified."
     }
   ]
 }

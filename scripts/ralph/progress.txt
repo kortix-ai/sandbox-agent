@@ -666,3 +666,16 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
   - crawl_pages scheme filter (`parsed.scheme() != "http" && ...`) must also include `file` for local testing
   - `truncated` detection relies on `!queue.is_empty()` — the loop must push back the popped URL when breaking early on max_pages, otherwise the dequeued item is lost and truncated is always false
 ---
+
+## 2026-03-17 - US-038
+- Fixed path traversal vulnerability in browser context_id
+- Added `validate_context_id()` function in `browser_context.rs`: checks hex-only regex + canonicalize defence-in-depth
+- Updated `delete_context()` to call `validate_context_id()` before `remove_dir_all`
+- Updated `start_chromium_locked()` in `browser_runtime.rs` to validate context_id before using in `--user-data-dir`
+- Added 5 new unit tests for path traversal and edge cases
+- Files changed: `browser_context.rs`, `browser_runtime.rs`
+- **Learnings for future iterations:**
+  - `validate_context_id` is pub and reusable from other modules (browser_runtime imports it via crate path)
+  - context_ids are always hex-encoded (32 hex chars from 16 random bytes), so `^[a-f0-9]+$` is the right validation
+  - Defence-in-depth pattern: validate format first, then canonicalize+verify path containment even if format looks safe
+---
