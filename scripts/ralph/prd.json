@@ -606,8 +606,8 @@
         "Tests pass"
       ],
       "priority": 37,
-      "passes": false,
-      "notes": "Crawl has real logic (BFS, domain filtering, depth limits, URL normalization) but no test coverage."
+      "passes": true,
+      "notes": "Crawl test uses 3 linked file:// HTML pages to verify BFS traversal, depth tracking, text extraction, totalPages, and truncated flag. Required fixing extract_links to also collect file:// links and the scheme filter to allow file:// URLs. Also fixed truncated detection bug: popped URL was lost when max_pages was reached."
     }
   ]
 }

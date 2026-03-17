@@ -28,6 +28,8 @@
 - Test helper `write_test_file()` uses `PUT /v1/fs/file?path=...` to write HTML test fixtures into the container
 - `docker/test-agent/Dockerfile` must include chromium + deps (libnss3, libatk-bridge2.0-0, libdrm2, libxcomposite1, libxdamage1, libxrandr2, libgbm1, libasound2, libpangocairo-1.0-0, libgtk-3-0) for browser integration tests
 - `get_page_info_via_cdp()` is a helper fn in router.rs for getting current URL and title via Runtime.evaluate
+- Crawl supports `file://`, `http://`, and `https://` schemes; `extract_links` JS filter and `crawl_pages` Rust scheme filter must both be updated when adding new schemes
+- Crawl `truncated` detection: when breaking early on max_pages, push the popped URL back into the queue before breaking so `!queue.is_empty()` is accurate
 - CDP event-based features (console, network monitoring) are captured asynchronously by background tasks; integration tests need ~1s sleep after triggering events before asserting on endpoint results
 - CDP `Page.getNavigationHistory` returns `{currentIndex, entries: [{id, url, title}]}` for back/forward navigation
 - CDP `Page.navigateToHistoryEntry` takes `{entryId}` (the id from history entries, not the index)
@@ -649,4 +651,18 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
   - CDP console events are captured asynchronously by background tokio tasks; tests need a ~1s sleep after navigation before checking console/network endpoints
   - CDP reports `console.warn` level as `"warn"` (after US-035 normalization), not `"warning"` — test assertions must match
   - `file://` URL navigations DO generate `Network.requestWillBeSent` events in Chromium, so network monitoring tests work with local files
+---
+
+## 2026-03-17 - US-037
+- Added `v1_browser_crawl` integration test with 3 linked HTML pages (page-a → page-b → page-c)
+- Test verifies BFS traversal across 3 pages with correct depths (0, 1, 2), text content extraction, totalPages=3, and truncated=false
+- Test verifies maxPages=1 returns only 1 page with truncated=true
+- Fixed `extract_links` to also collect `file://` links (was only collecting `http://`) so local file crawl tests work
+- Fixed crawl scheme filter to allow `file://` URLs in addition to `http://` and `https://`
+- Fixed truncated detection bug: when max_pages was reached, the popped URL was lost from the queue making truncated always false; now pushes it back before breaking
+- Files changed: server/packages/sandbox-agent/src/browser_crawl.rs, server/packages/sandbox-agent/tests/browser_api.rs
+- **Learnings for future iterations:**
+  - `extract_links` uses JavaScript `a.href.startsWith(...)` to filter — relative links in `file://` pages resolve to `file:///...` URLs, not `http://`, so the filter must include `file:` prefix
+  - crawl_pages scheme filter (`parsed.scheme() != "http" && ...`) must also include `file` for local testing
+  - `truncated` detection relies on `!queue.is_empty()` — the loop must push back the popped URL when breaking early on max_pages, otherwise the dequeued item is lost and truncated is always false
 ---
