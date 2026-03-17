@@ -80,6 +80,7 @@ struct BrowserRuntimeStateData {
     recording_fps: Option<u32>,
     console_messages: VecDeque<BrowserConsoleMessage>,
     network_requests: VecDeque<BrowserNetworkRequest>,
+    cdp_listener_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for BrowserRuntimeStateData {
@@ -139,6 +140,7 @@ impl BrowserRuntime {
                 recording_fps: None,
                 console_messages: VecDeque::new(),
                 network_requests: VecDeque::new(),
+                cdp_listener_tasks: Vec::new(),
             })),
             config,
         }
@@ -298,7 +300,7 @@ impl BrowserRuntime {
                 // Subscribe to console events and populate ring buffer
                 let console_rx = cdp.subscribe("Runtime.consoleAPICalled").await;
                 let inner_clone = self.inner.clone();
-                tokio::spawn(async move {
+                let console_handle = tokio::spawn(async move {
                     let mut rx = console_rx;
                     while let Some(params) = rx.recv().await {
                         let raw_level =
@@ -371,7 +373,7 @@ impl BrowserRuntime {
                 let request_rx = cdp.subscribe("Network.requestWillBeSent").await;
                 let response_rx = cdp.subscribe("Network.responseReceived").await;
                 let inner_clone2 = self.inner.clone();
-                tokio::spawn(async move {
+                let request_handle = tokio::spawn(async move {
                     let mut rx = request_rx;
                     while let Some(params) = rx.recv().await {
                         let request_id = params
@@ -420,7 +422,7 @@ impl BrowserRuntime {
 
                 // Subscribe to network response events to update existing requests
                 let inner_clone3 = self.inner.clone();
-                tokio::spawn(async move {
+                let response_handle = tokio::spawn(async move {
                     let mut rx = response_rx;
                     while let Some(params) = rx.recv().await {
                         let request_id = params
@@ -454,6 +456,8 @@ impl BrowserRuntime {
                         }
                     }
                 });
+
+                state.cdp_listener_tasks = vec![console_handle, request_handle, response_handle];
             }
             Err(problem) => {
                 return Err(self.fail_start_locked(&mut state, problem).await);
@@ -512,6 +516,11 @@ impl BrowserRuntime {
 
         state.state = BrowserState::Stopping;
         self.write_runtime_log_locked(&state, "stopping browser runtime");
+
+        // Abort CDP listener tasks before closing the client
+        for handle in state.cdp_listener_tasks.drain(..) {
+            handle.abort();
+        }
 
         // Close CDP client
         if let Some(ref cdp_client) = state.cdp_client.take() {
