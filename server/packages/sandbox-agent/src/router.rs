@@ -303,6 +303,8 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/browser/select", post(post_v1_browser_select))
         .route("/browser/hover", post(post_v1_browser_hover))
         .route("/browser/scroll", post(post_v1_browser_scroll))
+        .route("/browser/upload", post(post_v1_browser_upload))
+        .route("/browser/dialog", post(post_v1_browser_dialog))
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -516,6 +518,8 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         post_v1_browser_select,
         post_v1_browser_hover,
         post_v1_browser_scroll,
+        post_v1_browser_upload,
+        post_v1_browser_dialog,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -619,6 +623,8 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserSelectRequest,
             BrowserHoverRequest,
             BrowserScrollRequest,
+            BrowserUploadRequest,
+            BrowserDialogRequest,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -2505,6 +2511,111 @@ async fn post_v1_browser_scroll(
         ))
         .into());
     }
+
+    Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Upload a file to a file input element in the browser page.
+///
+/// Resolves the file input element matching `selector` and sets the specified
+/// file path using `DOM.setFileInputFiles`.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/upload",
+    tag = "v1",
+    request_body = BrowserUploadRequest,
+    responses(
+        (status = 200, description = "File uploaded to input", body = BrowserActionResponse),
+        (status = 404, description = "Element not found", body = ProblemDetails),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_upload(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserUploadRequest>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    cdp.send("DOM.enable", None).await?;
+
+    // Get document root
+    let doc = cdp.send("DOM.getDocument", None).await?;
+    let root_id = doc
+        .get("root")
+        .and_then(|r| r.get("nodeId"))
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+
+    // Find file input element by selector
+    let qs_result = cdp
+        .send(
+            "DOM.querySelector",
+            Some(serde_json::json!({
+                "nodeId": root_id,
+                "selector": body.selector
+            })),
+        )
+        .await?;
+
+    let node_id = qs_result
+        .get("nodeId")
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+
+    if node_id == 0 {
+        return Err(
+            BrowserProblem::not_found(format!("Element not found: {}", body.selector)).into(),
+        );
+    }
+
+    // Set file input files
+    cdp.send(
+        "DOM.setFileInputFiles",
+        Some(serde_json::json!({
+            "files": [body.path],
+            "nodeId": node_id
+        })),
+    )
+    .await?;
+
+    Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Handle a JavaScript dialog (alert, confirm, prompt) in the browser.
+///
+/// Accepts or dismisses the currently open dialog using
+/// `Page.handleJavaScriptDialog`, optionally providing prompt text.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/dialog",
+    tag = "v1",
+    request_body = BrowserDialogRequest,
+    responses(
+        (status = 200, description = "Dialog handled", body = BrowserActionResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_dialog(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserDialogRequest>,
+) -> Result<Json<BrowserActionResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let mut params = serde_json::json!({
+        "accept": body.accept
+    });
+
+    if let Some(ref text) = body.text {
+        params
+            .as_object_mut()
+            .unwrap()
+            .insert("promptText".to_string(), serde_json::json!(text));
+    }
+
+    cdp.send("Page.handleJavaScriptDialog", Some(params))
+        .await?;
 
     Ok(Json(BrowserActionResponse { ok: true }))
 }
