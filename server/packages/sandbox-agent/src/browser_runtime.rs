@@ -549,20 +549,6 @@ impl BrowserRuntime {
         let _ = self.stop().await;
     }
 
-    /// Get a reference to the CDP client, if connected.
-    pub async fn cdp_client(&self) -> Result<CdpClient, BrowserProblem> {
-        let state = self.inner.lock().await;
-        if state.state != BrowserState::Active {
-            return Err(BrowserProblem::not_active());
-        }
-        // We cannot return a reference out of the Mutex, so we need to use
-        // the send method directly. For now, return an error if not connected.
-        // Callers should use `with_cdp` instead.
-        Err(BrowserProblem::cdp_error(
-            "Use with_cdp() to execute CDP commands",
-        ))
-    }
-
     /// Execute a closure with the CDP client while holding the state lock.
     pub async fn with_cdp<F, Fut, T>(&self, f: F) -> Result<T, BrowserProblem>
     where
