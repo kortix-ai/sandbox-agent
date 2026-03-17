@@ -57,6 +57,11 @@ impl BrowserProblem {
         Self::new(500, "Browser Start Failed", "browser/start-failed", message)
     }
 
+    // 500 - internal error (filesystem, serialization, etc.)
+    pub fn internal_error(message: impl Into<String>) -> Self {
+        Self::new(500, "Internal Error", "browser/internal-error", message)
+    }
+
     // 502 - CDP communication error
     pub fn cdp_error(message: impl Into<String>) -> Self {
         Self::new(502, "CDP Error", "browser/cdp-error", message)

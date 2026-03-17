@@ -31,7 +31,7 @@ pub fn list_contexts(state_dir: &Path) -> Result<Vec<BrowserContextInfo>, Browse
 
     let mut contexts = Vec::new();
     let entries = fs::read_dir(&base).map_err(|e| {
-        BrowserProblem::start_failed(format!("failed to read contexts directory: {e}"))
+        BrowserProblem::internal_error(format!("failed to read contexts directory: {e}"))
     })?;
 
     for entry in entries {
@@ -78,7 +78,7 @@ pub fn create_context(
     let context_dir = base.join(&id);
 
     fs::create_dir_all(&context_dir).map_err(|e| {
-        BrowserProblem::start_failed(format!("failed to create context directory: {e}"))
+        BrowserProblem::internal_error(format!("failed to create context directory: {e}"))
     })?;
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -89,11 +89,11 @@ pub fn create_context(
     };
 
     let meta_bytes = serde_json::to_vec_pretty(&meta).map_err(|e| {
-        BrowserProblem::start_failed(format!("failed to serialize context metadata: {e}"))
+        BrowserProblem::internal_error(format!("failed to serialize context metadata: {e}"))
     })?;
 
     fs::write(context_dir.join(META_FILE), meta_bytes).map_err(|e| {
-        BrowserProblem::start_failed(format!("failed to write context metadata: {e}"))
+        BrowserProblem::internal_error(format!("failed to write context metadata: {e}"))
     })?;
 
     Ok(BrowserContextInfo {
@@ -116,7 +116,7 @@ pub fn delete_context(state_dir: &Path, context_id: &str) -> Result<(), BrowserP
     }
 
     fs::remove_dir_all(&context_dir).map_err(|e| {
-        BrowserProblem::start_failed(format!("failed to delete context directory: {e}"))
+        BrowserProblem::internal_error(format!("failed to delete context directory: {e}"))
     })?;
 
     Ok(())

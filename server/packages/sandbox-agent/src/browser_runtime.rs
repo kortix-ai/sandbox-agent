@@ -301,12 +301,14 @@ impl BrowserRuntime {
                 tokio::spawn(async move {
                     let mut rx = console_rx;
                     while let Some(params) = rx.recv().await {
-                        let level = params
-                            .get("type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("log")
-                            .to_string();
-                        // CDP uses "warning" as type but we normalize to "warning"
+                        let raw_level =
+                            params.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                        // CDP uses "warning" as type but we normalize to "warn"
+                        let level = if raw_level == "warning" {
+                            "warn".to_string()
+                        } else {
+                            raw_level.to_string()
+                        };
                         let args = params
                             .get("args")
                             .and_then(|v| v.as_array())
