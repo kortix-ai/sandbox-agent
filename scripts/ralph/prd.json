@@ -542,7 +542,7 @@
         "Typecheck passes"
       ],
       "priority": 33,
-      "passes": false,
+      "passes": true,
       "notes": "Spec section 3.1 says defaults are 1280x720 but browser_runtime.rs uses 1440x900."
     },
     {
@@ -557,8 +557,8 @@
         "Typecheck passes"
       ],
       "priority": 34,
-      "passes": false,
-      "notes": "Currently BrowserRuntime checks DesktopRuntime before starting, but DesktopRuntime does not check BrowserRuntime. This is a one-sided guard."
+      "passes": true,
+      "notes": "Used OnceLock<Arc<BrowserRuntime>> in DesktopRuntime to break the circular construction dependency. set_browser_runtime() called in router.rs after both runtimes are created. Check mirrors BrowserRuntime's pattern: check before acquiring state lock, return 409."
     },
     {
       "id": "US-035",

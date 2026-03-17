@@ -12,6 +12,7 @@
 - WebSocket text messages use `Utf8Bytes` in tungstenite 0.24; use `.into()` for String->Utf8Bytes and `.to_string()` for Utf8Bytes->String
 - No new crate dependencies needed for WebSocket CDP client; `tokio-tungstenite`, `reqwest`, `futures` already in Cargo.toml
 - BrowserRuntime pattern: separate struct from DesktopRuntime, shares Xvfb start logic and DesktopStreamingManager; mutual exclusivity checked via `desktop_runtime.status().await`
+- Circular Arc reference pattern: use `OnceLock<Arc<T>>` field + `set_*()` method called after both objects are constructed (see DesktopRuntime.browser_runtime)
 - AppState in `router.rs` (not state.rs): add field, create in `with_branding()`, add accessor method
 - `ProcessOwner::Desktop` is reused for browser processes (there's no `ProcessOwner::Browser` variant)
 - Browser uses display :98 by default (desktop uses :99) to avoid conflicts
@@ -606,4 +607,24 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
 - **Learnings for future iterations:**
   - When removing methods, grep for the method name across the entire src directory to confirm no callers
   - The `cdp_client` field on BrowserRuntimeState and the `cdp_client()` method on BrowserRuntime are different things - field is actively used
+---
+
+## 2026-03-17 - US-033
+- Changed DEFAULT_WIDTH from 1440 to 1280 and DEFAULT_HEIGHT from 900 to 720 in browser_runtime.rs to match spec section 3.1
+- Files changed: server/packages/sandbox-agent/src/browser_runtime.rs
+- **Learnings for future iterations:**
+  - Constants DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_DPI are at top of browser_runtime.rs (lines 27-29)
+  - Spec defaults should be verified against the original spec document when implementing
+---
+
+## 2026-03-17 - US-034
+- Added reverse mutual exclusivity check in DesktopRuntime.start() to reject starting when BrowserRuntime is active
+- Added `DesktopProblem::browser_conflict()` error variant (409, "desktop/browser-conflict")
+- Used `OnceLock<Arc<BrowserRuntime>>` field in DesktopRuntime to break circular construction dependency
+- Added `set_browser_runtime()` method called from router.rs after both runtimes are created
+- Files changed: desktop_errors.rs, desktop_runtime.rs, router.rs
+- **Learnings for future iterations:**
+  - Circular Arc references between DesktopRuntime and BrowserRuntime are broken with `OnceLock` pattern: first runtime constructed gets a `set_*` method called after the second is created
+  - Mutual exclusivity checks should be placed BEFORE acquiring the state lock, consistent with BrowserRuntime's pattern
+  - `OnceLock` implements Debug and Clone (when T does), so it works with `#[derive(Debug, Clone)]` on the parent struct
 ---
