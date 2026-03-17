@@ -296,6 +296,8 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/browser/markdown", get(get_v1_browser_markdown))
         .route("/browser/links", get(get_v1_browser_links))
         .route("/browser/snapshot", get(get_v1_browser_snapshot))
+        .route("/browser/scrape", post(post_v1_browser_scrape))
+        .route("/browser/execute", post(post_v1_browser_execute))
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -502,6 +504,8 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         get_v1_browser_markdown,
         get_v1_browser_links,
         get_v1_browser_snapshot,
+        post_v1_browser_scrape,
+        post_v1_browser_execute,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -595,6 +599,10 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserLinkInfo,
             BrowserLinksResponse,
             BrowserSnapshotResponse,
+            BrowserScrapeRequest,
+            BrowserScrapeResponse,
+            BrowserExecuteRequest,
+            BrowserExecuteResponse,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -1905,6 +1913,141 @@ async fn get_v1_browser_snapshot(
         snapshot,
         url,
         title,
+    }))
+}
+
+/// Scrape structured data from the current page using CSS selectors.
+///
+/// For each key in the `selectors` map, runs `querySelectorAll` with the CSS
+/// selector value and collects `textContent` from every match. If `url` is
+/// provided the browser navigates there first.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/scrape",
+    tag = "v1",
+    request_body = BrowserScrapeRequest,
+    responses(
+        (status = 200, description = "Scraped data", body = BrowserScrapeResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_scrape(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserScrapeRequest>,
+) -> Result<Json<BrowserScrapeResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    // Navigate first if a URL was provided
+    if let Some(ref url) = body.url {
+        cdp.send("Page.enable", None).await?;
+        cdp.send("Page.navigate", Some(serde_json::json!({ "url": url })))
+            .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    // Build a JS expression that evaluates all selectors and returns a JSON object
+    let selectors_json = serde_json::to_string(&body.selectors)
+        .map_err(|e| BrowserProblem::cdp_error(e.to_string()))?;
+
+    let expression = format!(
+        r#"(() => {{
+            const selectors = {selectors_json};
+            const result = {{}};
+            for (const [key, sel] of Object.entries(selectors)) {{
+                const els = document.querySelectorAll(sel);
+                result[key] = Array.from(els).map(el => (el.textContent || '').trim());
+            }}
+            return JSON.stringify(result);
+        }})()"#
+    );
+
+    let result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": expression,
+                "returnByValue": true
+            })),
+        )
+        .await?;
+
+    let json_str = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}");
+
+    let data: std::collections::HashMap<String, Vec<String>> =
+        serde_json::from_str(json_str).unwrap_or_default();
+
+    let (url, title) = get_page_info_via_cdp(&cdp).await?;
+
+    Ok(Json(BrowserScrapeResponse { data, url, title }))
+}
+
+/// Execute a JavaScript expression in the browser.
+///
+/// Evaluates the given expression via CDP `Runtime.evaluate` and returns the
+/// result value and its type. Set `awaitPromise` to resolve async expressions.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/execute",
+    tag = "v1",
+    request_body = BrowserExecuteRequest,
+    responses(
+        (status = 200, description = "Execution result", body = BrowserExecuteResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_execute(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserExecuteRequest>,
+) -> Result<Json<BrowserExecuteResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let mut params = serde_json::json!({
+        "expression": body.expression,
+        "returnByValue": true
+    });
+
+    if let Some(true) = body.await_promise {
+        params["awaitPromise"] = serde_json::json!(true);
+    }
+
+    let result = cdp.send("Runtime.evaluate", Some(params)).await?;
+
+    // Check for evaluation exceptions
+    if let Some(exception) = result.get("exceptionDetails") {
+        let msg = exception
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exception.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("Script execution failed");
+        return Err(BrowserProblem::cdp_error(msg.to_string()).into());
+    }
+
+    let eval_result = result
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    let type_ = eval_result
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("undefined")
+        .to_string();
+
+    let value = eval_result
+        .get("value")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    Ok(Json(BrowserExecuteResponse {
+        result: value,
+        type_,
     }))
 }
 
