@@ -74,7 +74,7 @@ struct BrowserRuntimeStateData {
     environment: HashMap<String, String>,
     xvfb: Option<ManagedBrowserProcess>,
     chromium: Option<ManagedBrowserProcess>,
-    cdp_client: Option<CdpClient>,
+    cdp_client: Option<Arc<CdpClient>>,
     context_id: Option<String>,
     streaming_config: Option<crate::desktop_streaming::StreamingConfig>,
     recording_fps: Option<u32>,
@@ -288,7 +288,7 @@ impl BrowserRuntime {
         // Connect CDP client
         match CdpClient::connect().await {
             Ok(client) => {
-                state.cdp_client = Some(client);
+                state.cdp_client = Some(Arc::new(client));
             }
             Err(problem) => {
                 return Err(self.fail_start_locked(&mut state, problem).await);
@@ -349,7 +349,7 @@ impl BrowserRuntime {
         self.write_runtime_log_locked(&state, "stopping browser runtime");
 
         // Close CDP client
-        if let Some(cdp_client) = state.cdp_client.take() {
+        if let Some(ref cdp_client) = state.cdp_client.take() {
             cdp_client.close().await;
         }
 
@@ -415,6 +415,21 @@ impl BrowserRuntime {
             .as_ref()
             .ok_or_else(|| BrowserProblem::cdp_error("CDP client is not connected"))?;
         f(cdp).await
+    }
+
+    /// Get an Arc-wrapped CDP client handle.
+    ///
+    /// Returns a cloned `Arc<CdpClient>` after verifying the browser is active.
+    /// The caller can use the returned handle without holding the state lock.
+    pub async fn get_cdp(&self) -> Result<Arc<CdpClient>, BrowserProblem> {
+        let state = self.inner.lock().await;
+        if state.state != BrowserState::Active {
+            return Err(BrowserProblem::not_active());
+        }
+        state
+            .cdp_client
+            .clone()
+            .ok_or_else(|| BrowserProblem::cdp_error("CDP client is not connected"))
     }
 
     /// Ensure the browser runtime is active.
@@ -818,7 +833,7 @@ impl BrowserRuntime {
         self.write_runtime_log_locked(state, "browser runtime startup failed; cleaning up");
 
         // Close CDP client if any
-        if let Some(cdp) = state.cdp_client.take() {
+        if let Some(ref cdp) = state.cdp_client.take() {
             cdp.close().await;
         }
 

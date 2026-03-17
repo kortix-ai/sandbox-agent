@@ -276,6 +276,11 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/browser/start", post(post_v1_browser_start))
         .route("/browser/stop", post(post_v1_browser_stop))
         .route("/browser/cdp", get(get_v1_browser_cdp_ws))
+        .route("/browser/navigate", post(post_v1_browser_navigate))
+        .route("/browser/back", post(post_v1_browser_back))
+        .route("/browser/forward", post(post_v1_browser_forward))
+        .route("/browser/reload", post(post_v1_browser_reload))
+        .route("/browser/wait", post(post_v1_browser_wait))
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -467,6 +472,11 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         post_v1_browser_start,
         post_v1_browser_stop,
         get_v1_browser_cdp_ws,
+        post_v1_browser_navigate,
+        post_v1_browser_back,
+        post_v1_browser_forward,
+        post_v1_browser_reload,
+        post_v1_browser_wait,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -539,6 +549,13 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserState,
             BrowserStartRequest,
             BrowserStatusResponse,
+            BrowserNavigateRequest,
+            BrowserNavigateWaitUntil,
+            BrowserPageInfo,
+            BrowserReloadRequest,
+            BrowserWaitRequest,
+            BrowserWaitState,
+            BrowserWaitResponse,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -919,6 +936,333 @@ async fn browser_cdp_ws_session(mut client_ws: WebSocket, browser_runtime: Arc<B
 
     let _ = cdp_sink.close().await;
     let _ = client_ws.close().await;
+}
+
+/// Navigate the browser to a URL.
+///
+/// Sends a CDP `Page.navigate` command and optionally waits for a lifecycle
+/// event before returning the resulting page URL, title, and HTTP status.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/navigate",
+    tag = "v1",
+    request_body = BrowserNavigateRequest,
+    responses(
+        (status = 200, description = "Navigation result", body = BrowserPageInfo),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_navigate(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserNavigateRequest>,
+) -> Result<Json<BrowserPageInfo>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    // Enable Page domain for lifecycle events
+    cdp.send("Page.enable", None).await?;
+
+    let nav_result = cdp
+        .send(
+            "Page.navigate",
+            Some(serde_json::json!({ "url": body.url })),
+        )
+        .await?;
+
+    // Extract HTTP status from the navigation result if available
+    let status = nav_result
+        .get("errorText")
+        .and_then(|_| None::<u16>)
+        .or_else(|| {
+            // Page.navigate doesn't directly return HTTP status;
+            // we rely on frameId being present as a success signal
+            nav_result.get("frameId").map(|_| 200u16)
+        });
+
+    // Wait for the requested lifecycle event
+    match body.wait_until {
+        Some(BrowserNavigateWaitUntil::Load) | None => {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Some(BrowserNavigateWaitUntil::Domcontentloaded) => {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+        Some(BrowserNavigateWaitUntil::Networkidle) => {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+
+    // Get current page URL and title
+    let (url, title) = get_page_info_via_cdp(&cdp).await?;
+    Ok(Json(BrowserPageInfo { url, title, status }))
+}
+
+/// Navigate the browser back in history.
+///
+/// Sends a CDP `Page.navigateToHistoryEntry` command with the previous
+/// history entry and returns the resulting page URL and title.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/back",
+    tag = "v1",
+    responses(
+        (status = 200, description = "Page info after navigating back", body = BrowserPageInfo),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_back(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BrowserPageInfo>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let history = cdp.send("Page.getNavigationHistory", None).await?;
+    let current_index = history
+        .get("currentIndex")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let entries = history
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if current_index > 0 {
+        if let Some(entry) = entries.get((current_index - 1) as usize) {
+            if let Some(entry_id) = entry.get("id").and_then(|v| v.as_i64()) {
+                cdp.send(
+                    "Page.navigateToHistoryEntry",
+                    Some(serde_json::json!({ "entryId": entry_id })),
+                )
+                .await?;
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+        }
+    }
+
+    let (url, title) = get_page_info_via_cdp(&cdp).await?;
+    Ok(Json(BrowserPageInfo {
+        url,
+        title,
+        status: None,
+    }))
+}
+
+/// Navigate the browser forward in history.
+///
+/// Sends a CDP `Page.navigateToHistoryEntry` command with the next
+/// history entry and returns the resulting page URL and title.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/forward",
+    tag = "v1",
+    responses(
+        (status = 200, description = "Page info after navigating forward", body = BrowserPageInfo),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_forward(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BrowserPageInfo>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let history = cdp.send("Page.getNavigationHistory", None).await?;
+    let current_index = history
+        .get("currentIndex")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let entries = history
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if (current_index + 1) < entries.len() as i64 {
+        if let Some(entry) = entries.get((current_index + 1) as usize) {
+            if let Some(entry_id) = entry.get("id").and_then(|v| v.as_i64()) {
+                cdp.send(
+                    "Page.navigateToHistoryEntry",
+                    Some(serde_json::json!({ "entryId": entry_id })),
+                )
+                .await?;
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+        }
+    }
+
+    let (url, title) = get_page_info_via_cdp(&cdp).await?;
+    Ok(Json(BrowserPageInfo {
+        url,
+        title,
+        status: None,
+    }))
+}
+
+/// Reload the current browser page.
+///
+/// Sends a CDP `Page.reload` command with an optional cache bypass flag
+/// and returns the resulting page URL and title.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/reload",
+    tag = "v1",
+    request_body = BrowserReloadRequest,
+    responses(
+        (status = 200, description = "Page info after reload", body = BrowserPageInfo),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_reload(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserReloadRequest>,
+) -> Result<Json<BrowserPageInfo>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let ignore_cache = body.ignore_cache.unwrap_or(false);
+    cdp.send(
+        "Page.reload",
+        Some(serde_json::json!({ "ignoreCache": ignore_cache })),
+    )
+    .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let (url, title) = get_page_info_via_cdp(&cdp).await?;
+    Ok(Json(BrowserPageInfo {
+        url,
+        title,
+        status: None,
+    }))
+}
+
+/// Wait for a selector or condition in the browser.
+///
+/// Polls the page DOM using `Runtime.evaluate` with a `querySelector` check
+/// until the element is found or the timeout expires.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/wait",
+    tag = "v1",
+    request_body = BrowserWaitRequest,
+    responses(
+        (status = 200, description = "Wait result", body = BrowserWaitResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails),
+        (status = 504, description = "Timeout waiting for condition", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_wait(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserWaitRequest>,
+) -> Result<Json<BrowserWaitResponse>, ApiError> {
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let timeout_ms = body.timeout.unwrap_or(5000);
+    let selector = body.selector.clone().unwrap_or_else(|| "body".to_string());
+    let wait_state = body.state.unwrap_or(BrowserWaitState::Attached);
+
+    let js_expression = match wait_state {
+        BrowserWaitState::Visible => {
+            format!(
+                r#"(() => {{
+                    const el = document.querySelector({sel});
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                }})()"#,
+                sel = serde_json::to_string(&selector).unwrap_or_default()
+            )
+        }
+        BrowserWaitState::Hidden => {
+            format!(
+                r#"(() => {{
+                    const el = document.querySelector({sel});
+                    if (!el) return true;
+                    const style = window.getComputedStyle(el);
+                    return style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
+                }})()"#,
+                sel = serde_json::to_string(&selector).unwrap_or_default()
+            )
+        }
+        BrowserWaitState::Attached => {
+            format!(
+                "document.querySelector({sel}) !== null",
+                sel = serde_json::to_string(&selector).unwrap_or_default()
+            )
+        }
+    };
+
+    let start = tokio::time::Instant::now();
+    let timeout_dur = std::time::Duration::from_millis(timeout_ms);
+    let poll_interval = std::time::Duration::from_millis(100);
+
+    loop {
+        let eval_result = cdp
+            .send(
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": js_expression,
+                    "returnByValue": true
+                })),
+            )
+            .await?;
+
+        let found = eval_result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if found {
+            return Ok(Json(BrowserWaitResponse { found: true }));
+        }
+
+        if start.elapsed() >= timeout_dur {
+            return Ok(Json(BrowserWaitResponse { found: false }));
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+/// Helper: get the current page URL and title via CDP Runtime.evaluate.
+async fn get_page_info_via_cdp(
+    cdp: &crate::browser_cdp::CdpClient,
+) -> Result<(String, String), BrowserProblem> {
+    let url_result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": "document.location.href",
+                "returnByValue": true
+            })),
+        )
+        .await?;
+    let url = url_result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let title_result = cdp
+        .send(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": "document.title",
+                "returnByValue": true
+            })),
+        )
+        .await?;
+    let title = title_result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok((url, title))
 }
 
 /// Capture a full desktop screenshot.

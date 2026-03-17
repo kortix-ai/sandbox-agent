@@ -154,7 +154,7 @@ impl CdpClient {
     }
 
     /// Close the CDP connection and stop the reader task.
-    pub async fn close(self) {
+    pub async fn close(&self) {
         self.reader_task.abort();
         let _ = self.ws_sender.lock().await.close().await;
     }
