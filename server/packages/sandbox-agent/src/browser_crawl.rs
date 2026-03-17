@@ -57,8 +57,36 @@ pub async fn crawl_pages(
 
         let status = nav_result.get("frameId").map(|_| 200u16);
 
-        // Wait for load.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Wait for page load by polling document.readyState until "complete".
+        // Polls every 100ms with a 10s timeout; proceeds with extraction if timeout reached.
+        let poll_interval = std::time::Duration::from_millis(100);
+        let load_timeout = std::time::Duration::from_secs(10);
+        let start_time = std::time::Instant::now();
+        loop {
+            if start_time.elapsed() >= load_timeout {
+                break;
+            }
+            let ready_result = cdp
+                .send(
+                    "Runtime.evaluate",
+                    Some(serde_json::json!({
+                        "expression": "document.readyState",
+                        "returnByValue": true
+                    })),
+                )
+                .await;
+            if let Ok(val) = ready_result {
+                let state = val
+                    .get("result")
+                    .and_then(|r| r.get("value"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if state == "complete" {
+                    break;
+                }
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
 
         // Get page info.
         let (page_url, title) = get_page_info(cdp).await?;
