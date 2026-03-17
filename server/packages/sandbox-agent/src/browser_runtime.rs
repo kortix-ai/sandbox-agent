@@ -288,7 +288,170 @@ impl BrowserRuntime {
         // Connect CDP client
         match CdpClient::connect().await {
             Ok(client) => {
-                state.cdp_client = Some(Arc::new(client));
+                let cdp = Arc::new(client);
+                state.cdp_client = Some(cdp.clone());
+
+                // Enable Runtime and Network domains for event monitoring
+                let _ = cdp.send("Runtime.enable", None).await;
+                let _ = cdp.send("Network.enable", None).await;
+
+                // Subscribe to console events and populate ring buffer
+                let console_rx = cdp.subscribe("Runtime.consoleAPICalled").await;
+                let inner_clone = self.inner.clone();
+                tokio::spawn(async move {
+                    let mut rx = console_rx;
+                    while let Some(params) = rx.recv().await {
+                        let level = params
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("log")
+                            .to_string();
+                        // CDP uses "warning" as type but we normalize to "warning"
+                        let args = params
+                            .get("args")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        let text = args
+                            .iter()
+                            .filter_map(|a| {
+                                a.get("value")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .or_else(|| {
+                                        a.get("description")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
+                                    })
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let stack_trace = params.get("stackTrace");
+                        let call_frame = stack_trace
+                            .and_then(|st| st.get("callFrames"))
+                            .and_then(|cf| cf.as_array())
+                            .and_then(|cf| cf.first());
+                        let url = call_frame
+                            .and_then(|f| f.get("url"))
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string());
+                        let line = call_frame
+                            .and_then(|f| f.get("lineNumber"))
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as u32);
+                        let timestamp = params
+                            .get("timestamp")
+                            .and_then(|v| v.as_f64())
+                            .map(|ts| {
+                                chrono::DateTime::from_timestamp_millis((ts * 1000.0) as i64)
+                                    .map(|dt| dt.to_rfc3339())
+                                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339())
+                            })
+                            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+                        let msg = BrowserConsoleMessage {
+                            level,
+                            text,
+                            url,
+                            line,
+                            timestamp,
+                        };
+                        let mut state = inner_clone.lock().await;
+                        if state.console_messages.len() >= MAX_CONSOLE_MESSAGES {
+                            state.console_messages.pop_front();
+                        }
+                        state.console_messages.push_back(msg);
+                    }
+                });
+
+                // Subscribe to network request events and populate ring buffer
+                let request_rx = cdp.subscribe("Network.requestWillBeSent").await;
+                let response_rx = cdp.subscribe("Network.responseReceived").await;
+                let inner_clone2 = self.inner.clone();
+                tokio::spawn(async move {
+                    let mut rx = request_rx;
+                    while let Some(params) = rx.recv().await {
+                        let request_id = params
+                            .get("requestId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let request = params.get("request");
+                        let url = request
+                            .and_then(|r| r.get("url"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let method = request
+                            .and_then(|r| r.get("method"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("GET")
+                            .to_string();
+                        let timestamp = params
+                            .get("timestamp")
+                            .and_then(|v| v.as_f64())
+                            .map(|ts| {
+                                chrono::DateTime::from_timestamp_millis((ts * 1000.0) as i64)
+                                    .map(|dt| dt.to_rfc3339())
+                                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339())
+                            })
+                            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+                        let net_req = BrowserNetworkRequest {
+                            request_id: Some(request_id),
+                            url,
+                            method,
+                            status: None,
+                            mime_type: None,
+                            response_size: None,
+                            duration: None,
+                            timestamp,
+                        };
+                        let mut state = inner_clone2.lock().await;
+                        if state.network_requests.len() >= MAX_NETWORK_REQUESTS {
+                            state.network_requests.pop_front();
+                        }
+                        state.network_requests.push_back(net_req);
+                    }
+                });
+
+                // Subscribe to network response events to update existing requests
+                let inner_clone3 = self.inner.clone();
+                tokio::spawn(async move {
+                    let mut rx = response_rx;
+                    while let Some(params) = rx.recv().await {
+                        let request_id = params
+                            .get("requestId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let response = params.get("response");
+                        let status = response
+                            .and_then(|r| r.get("status"))
+                            .and_then(|v| v.as_u64())
+                            .map(|s| s as u16);
+                        let mime_type = response
+                            .and_then(|r| r.get("mimeType"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let response_size = response
+                            .and_then(|r| r.get("encodedDataLength"))
+                            .and_then(|v| v.as_u64());
+
+                        let mut state = inner_clone3.lock().await;
+                        // Find the matching request and update it
+                        if let Some(req) = state
+                            .network_requests
+                            .iter_mut()
+                            .rev()
+                            .find(|r| r.request_id.as_deref() == Some(request_id))
+                        {
+                            req.status = status;
+                            req.mime_type = mime_type;
+                            req.response_size = response_size;
+                        }
+                    }
+                });
             }
             Err(problem) => {
                 return Err(self.fail_start_locked(&mut state, problem).await);

@@ -1,0 +1,493 @@
+{
+  "project": "SandboxAgent",
+  "branchName": "ralph/browser-automation",
+  "description": "Browser Automation - HTTP API, CLI install, TypeScript SDK, inspector UI, and Rust modules for controlling Chromium via CDP inside sandboxes",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add browser_install.rs CLI command",
+      "description": "As a developer, I need a CLI command to install Chromium and browser dependencies into the sandbox.",
+      "acceptanceCriteria": [
+        "New file server/packages/sandbox-agent/src/browser_install.rs following desktop_install.rs pattern",
+        "BrowserInstallRequest struct with yes, print_only, package_manager fields",
+        "install_browser function: platform check (Linux only), detect/validate package manager, build package list, privilege check, display + confirm, run install",
+        "APT packages: chromium, chromium-sandbox, libnss3, libatk-bridge2.0-0, libdrm2, libxcomposite1, libxdamage1, libxrandr2, libgbm1, libasound2, libpangocairo-1.0-0, libgtk-3-0",
+        "DNF packages: chromium",
+        "APK packages: chromium, nss",
+        "detect_missing_browser_dependencies() checks for chromium/chromium-browser in PATH and desktop deps",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Reuse detect_package_manager and DesktopPackageManager from desktop_install.rs"
+    },
+    {
+      "id": "US-002",
+      "title": "Register install browser subcommand in CLI",
+      "description": "As a developer, I need the Browser variant added to InstallCommand enum in cli.rs.",
+      "acceptanceCriteria": [
+        "Add Browser(InstallBrowserArgs) variant to InstallCommand enum in cli.rs",
+        "InstallBrowserArgs struct with --yes, --print-only, --package-manager flags",
+        "CLI dispatches to install_browser when 'install browser' is invoked",
+        "Add mod browser_install to lib.rs",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Add browser type definitions (DTOs and errors)",
+      "description": "As a developer, I need request/response types and error types for the browser API.",
+      "acceptanceCriteria": [
+        "New file server/packages/sandbox-agent/src/browser_types.rs with serde + utoipa + schemars derives",
+        "BrowserStartRequest with width, height, dpi, url, headless, contextId, streaming fields",
+        "BrowserStatusResponse with state, display, resolution, startedAt, cdpUrl, url, missingDependencies, installCommand, processes, lastError",
+        "BrowserState enum: Inactive, InstallRequired, Starting, Active, Stopping, Failed",
+        "BrowserPageInfo, BrowserTabInfo, BrowserNavigateRequest, BrowserScreenshotRequest, BrowserClickRequest, BrowserTypeRequest, BrowserCrawlRequest and all other request/response types from the spec",
+        "New file server/packages/sandbox-agent/src/browser_errors.rs with BrowserProblem enum: NotActive, AlreadyActive, DesktopConflict, InstallRequired, StartFailed, CdpError, Timeout, NotFound, InvalidSelector",
+        "All errors return application/problem+json with tag:sandboxagent.dev,2025:browser/* URIs",
+        "Add mod browser_types and mod browser_errors to lib.rs",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "Mirror DesktopProblem patterns for error handling"
+    },
+    {
+      "id": "US-004",
+      "title": "Add CdpClient for communicating with Chromium",
+      "description": "As a developer, I need a persistent WebSocket client to send CDP commands to Chromium.",
+      "acceptanceCriteria": [
+        "New file server/packages/sandbox-agent/src/browser_cdp.rs",
+        "CdpClient struct with WebSocket connection and AtomicU64 for request IDs",
+        "connect() method: connects to ws://127.0.0.1:9222/devtools/browser/{id} (discovered via http://127.0.0.1:9222/json/version)",
+        "send(method, params) method: sends CDP command and waits for matching response by ID",
+        "subscribe(event, callback) method for subscribing to CDP events like Runtime.consoleAPICalled and Network.requestWillBeSent",
+        "Add mod browser_cdp to lib.rs",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Add BrowserRuntime state machine",
+      "description": "As a developer, I need the core runtime that manages Xvfb + Chromium + Neko lifecycle.",
+      "acceptanceCriteria": [
+        "New file server/packages/sandbox-agent/src/browser_runtime.rs",
+        "BrowserRuntime struct with config, process_runtime, desktop_streaming_manager, desktop_recording_manager, cdp_client, inner state",
+        "BrowserRuntimeState with state, xvfb_process_id, chromium_process_id, display, resolution, started_at, last_error, console_messages (VecDeque max 1000), network_requests (VecDeque max 1000)",
+        "start() method: check deps, start Xvfb (reuse start_xvfb_locked), start Chromium with correct flags (--no-sandbox, --remote-debugging-port=9222, etc.), poll CDP /json/version until ready (15s timeout), optionally start Neko",
+        "stop() method: kill Chromium, stop Neko, stop Xvfb",
+        "status() method: return current BrowserStatusResponse",
+        "Check DesktopRuntime is not active before starting (mutual exclusivity), return 409 if conflict",
+        "Add BrowserRuntime to app state in state.rs",
+        "Add mod browser_runtime to lib.rs",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Implemented as separate BrowserRuntime (not a mode of DesktopRuntime) for cleaner separation of concerns. Shares Xvfb start logic and DesktopStreamingManager. Mutual exclusivity checked via DesktopRuntime.status()."
+    },
+    {
+      "id": "US-006",
+      "title": "Add browser lifecycle HTTP endpoints (start/stop/status)",
+      "description": "As a user, I need HTTP endpoints to start, stop, and check the browser.",
+      "acceptanceCriteria": [
+        "POST /v1/browser/start endpoint: accepts BrowserStartRequest, returns BrowserStatusResponse",
+        "POST /v1/browser/stop endpoint: stops browser, returns { state: 'inactive' }",
+        "GET /v1/browser/status endpoint: returns BrowserStatusResponse",
+        "Routes registered in router.rs following existing patterns",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Add CDP WebSocket proxy endpoint",
+      "description": "As a user, I need to connect Playwright/Puppeteer through the sandbox agent to Chromium's CDP.",
+      "acceptanceCriteria": [
+        "GET /v1/browser/cdp endpoint: WebSocket upgrade",
+        "Bidirectional WebSocket relay proxying to ws://127.0.0.1:9222/devtools/browser/{id}",
+        "Follow same pattern as Neko signaling proxy in router.rs",
+        "External Playwright can connect via ws://sandbox-host:2468/v1/browser/cdp",
+        "Returns BrowserProblem::NotActive if browser not running",
+        "Typecheck passes"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Add browser navigation endpoints",
+      "description": "As a user, I need HTTP endpoints for navigating the browser.",
+      "acceptanceCriteria": [
+        "POST /v1/browser/navigate: accepts { url, waitUntil? }, returns { url, title, status } via CDP Page.navigate + Page.lifecycleEvent",
+        "POST /v1/browser/back: returns { url, title } via CDP Page.navigateHistory delta -1",
+        "POST /v1/browser/forward: returns { url, title } via CDP Page.navigateHistory delta 1",
+        "POST /v1/browser/reload: accepts { ignoreCache? }, returns { url, title }",
+        "POST /v1/browser/wait: accepts { selector?, timeout?, state? }, returns { found } using Runtime.evaluate with MutationObserver or DOM.querySelector polling",
+        "All routes registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Used get_cdp() (Arc<CdpClient>) pattern instead of with_cdp() closure to avoid async lifetime issues"
+    },
+    {
+      "id": "US-009",
+      "title": "Add browser tab management endpoints",
+      "description": "As a user, I need to list, create, activate, and close browser tabs.",
+      "acceptanceCriteria": [
+        "GET /v1/browser/tabs: returns { tabs: [{ id, url, title, active }] } via Target.getTargets filtered to type page",
+        "POST /v1/browser/tabs: accepts { url? }, returns { id, url, title } (201) via Target.createTarget",
+        "POST /v1/browser/tabs/:tab_id/activate: returns { id, url, title } via Target.activateTarget",
+        "DELETE /v1/browser/tabs/:tab_id: returns { ok: true } via Target.closeTarget",
+        "All routes registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Used Target.getTargets for listing, Target.createTarget/activateTarget/closeTarget for CRUD. Active tab detection uses Page.getNavigationHistory URL matching."
+    },
+    {
+      "id": "US-010",
+      "title": "Add browser screenshot and PDF endpoints",
+      "description": "As a user, I need to capture screenshots and PDFs of browser pages.",
+      "acceptanceCriteria": [
+        "GET /v1/browser/screenshot: query params format (png/jpeg/webp), quality, fullPage, selector; returns image binary with correct Content-Type via Page.captureScreenshot",
+        "GET /v1/browser/pdf: query params format (a4/letter/legal), landscape, printBackground, scale; returns application/pdf via Page.printToPDF",
+        "Both routes registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Browser screenshot is distinct from desktop screenshot - this captures the viewport/page via CDP, not the Xvfb display. Uses Page.captureScreenshot and Page.printToPDF CDP commands with base64 decoding."
+    },
+    {
+      "id": "US-011",
+      "title": "Add browser content extraction endpoints (HTML, markdown, links, snapshot)",
+      "description": "As a user, I need to extract page content in various formats.",
+      "acceptanceCriteria": [
+        "GET /v1/browser/content: query param selector?; returns { html, url, title } via Runtime.evaluate document.documentElement.outerHTML",
+        "GET /v1/browser/markdown: returns { markdown, url, title }; extract DOM via CDP, convert with html2md crate, strip nav/footer/aside",
+        "GET /v1/browser/links: returns { links: [{ href, text }], url }",
+        "GET /v1/browser/snapshot: returns { snapshot, url, title } via Accessibility.getFullAXTree",
+        "All routes registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "Used html2md crate for HTML-to-Markdown conversion. Accessibility.getFullAXTree for snapshot. Runtime.evaluate for content/links extraction."
+    },
+    {
+      "id": "US-012",
+      "title": "Add browser scrape and execute endpoints",
+      "description": "As a user, I need to scrape structured data and execute JavaScript in the browser.",
+      "acceptanceCriteria": [
+        "POST /v1/browser/scrape: accepts { selectors: Record<string,string>, url? }; returns { data: Record<string,string[]>, url, title } via Runtime.evaluate with querySelectorAll + textContent",
+        "POST /v1/browser/execute: accepts { expression, awaitPromise? }; returns { result, type } via Runtime.evaluate",
+        "Both routes registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "Uses Runtime.evaluate with querySelectorAll for scrape, Runtime.evaluate with returnByValue for execute. Scrape optionally navigates first if url provided. Execute checks for exceptionDetails and returns CDP error."
+    },
+    {
+      "id": "US-013",
+      "title": "Add browser interaction endpoints (click, type, select, hover, scroll)",
+      "description": "As a user, I need to interact with page elements via CSS selectors.",
+      "acceptanceCriteria": [
+        "POST /v1/browser/click: accepts { selector, button?, clickCount?, timeout? }; uses DOM.querySelector + DOM.getBoxModel + Input.dispatchMouseEvent",
+        "POST /v1/browser/type: accepts { selector, text, delay?, clear? }; uses DOM.focus + Input.dispatchKeyEvent",
+        "POST /v1/browser/select: accepts { selector, value }",
+        "POST /v1/browser/hover: accepts { selector }",
+        "POST /v1/browser/scroll: accepts { selector?, x?, y? }",
+        "All return { ok: true } on success",
+        "All routes registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "These are browser-level (CDP) interactions, distinct from desktop xdotool input. Click/hover use DOM.querySelector + DOM.getBoxModel + Input.dispatchMouseEvent. Type uses DOM.focus + Input.dispatchKeyEvent. Select/scroll use Runtime.evaluate."
+    },
+    {
+      "id": "US-014",
+      "title": "Add browser upload and dialog endpoints",
+      "description": "As a user, I need to upload files and handle JavaScript dialogs.",
+      "acceptanceCriteria": [
+        "POST /v1/browser/upload: accepts { selector, path }; uses DOM.setFileInputFiles; returns { ok: true }",
+        "POST /v1/browser/dialog: accepts { accept, text? }; uses Page.handleJavaScriptDialog; returns { ok: true }",
+        "Both routes registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": true,
+      "notes": "DOM.setFileInputFiles for upload (requires DOM.querySelector to find node), Page.handleJavaScriptDialog for dialog with optional promptText parameter"
+    },
+    {
+      "id": "US-015",
+      "title": "Add browser console and network monitoring endpoints",
+      "description": "As a user, I need to see console logs and network requests from the browser.",
+      "acceptanceCriteria": [
+        "GET /v1/browser/console: query params level?, limit? (default 100); returns { messages: [{ level, text, url?, line?, timestamp }] }",
+        "GET /v1/browser/network: query params limit?, urlPattern?; returns { requests: [{ url, method, status, mimeType, responseSize, duration, timestamp }] }",
+        "BrowserRuntime subscribes to Runtime.consoleAPICalled and Network.requestWillBeSent + Network.responseReceived events via CdpClient",
+        "Messages/requests buffered in bounded ring buffers (max 1000 each) in BrowserRuntimeState",
+        "Both routes registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": true,
+      "notes": "CDP events (Runtime.consoleAPICalled, Network.requestWillBeSent, Network.responseReceived) subscribed in start(). Network requests correlated via internal request_id field. Background tokio tasks populate ring buffers."
+    },
+    {
+      "id": "US-016",
+      "title": "Add browser context (persistent profile) management",
+      "description": "As a user, I need to create and manage persistent browser profiles for cookies/storage.",
+      "acceptanceCriteria": [
+        "New file server/packages/sandbox-agent/src/browser_context.rs",
+        "GET /v1/browser/contexts: returns { contexts: [{ id, name, createdAt, sizeBytes }] }",
+        "POST /v1/browser/contexts: accepts { name }; creates user-data-dir at $STATE_DIR/browser-contexts/{id}/; returns { id, name, createdAt } (201)",
+        "DELETE /v1/browser/contexts/:context_id: deletes context directory",
+        "POST /v1/browser/start accepts contextId to set --user-data-dir to context's directory",
+        "Add mod browser_context to lib.rs",
+        "All routes registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Add browser cookie management endpoints",
+      "description": "As a user, I need to get, set, and clear cookies in the browser.",
+      "acceptanceCriteria": [
+        "GET /v1/browser/cookies: query param url?; returns { cookies: [{ name, value, domain, path, expires, httpOnly, secure, sameSite }] } via Network.getCookies",
+        "POST /v1/browser/cookies: accepts { cookies: [...] }; uses Network.setCookies; returns { ok: true }",
+        "DELETE /v1/browser/cookies: query params name?, domain?; clears matching cookies",
+        "All routes registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Add browser crawl endpoint",
+      "description": "As a user, I need to crawl multiple pages starting from a URL.",
+      "acceptanceCriteria": [
+        "New file server/packages/sandbox-agent/src/browser_crawl.rs",
+        "POST /v1/browser/crawl: accepts { url, maxPages? (default 10, max 100), maxDepth? (default 2), allowedDomains?, extract? (markdown|html|text|links) }",
+        "Returns { pages: [{ url, title, content, links, status, depth }], totalPages, truncated }",
+        "BFS crawl implementation: navigate, wait for load, extract content, collect links, filter by domain/depth",
+        "Add mod browser_crawl to lib.rs",
+        "Route registered in router.rs",
+        "Typecheck passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "Add TypeScript SDK browser types",
+      "description": "As a developer, I need TypeScript type definitions for all browser API requests and responses.",
+      "acceptanceCriteria": [
+        "New file sdks/typescript/src/types/browser.ts with all interfaces: BrowserStartRequest, BrowserStatusResponse, BrowserTabInfo, BrowserPageInfo, BrowserNavigateRequest, BrowserScreenshotRequest, BrowserClickRequest, BrowserTypeRequest, BrowserCrawlRequest, BrowserCrawlResponse, BrowserContextInfo, BrowserCookie, and all other request/response types",
+        "Types exported from sdks/typescript/src/types/index.ts (or equivalent barrel)",
+        "Typecheck passes"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Add TypeScript SDK browser lifecycle and CDP methods",
+      "description": "As a developer, I need SDK methods for browser lifecycle and CDP access.",
+      "acceptanceCriteria": [
+        "startBrowser(request?) method on SandboxAgent class calling POST /v1/browser/start",
+        "stopBrowser() method calling POST /v1/browser/stop",
+        "getBrowserStatus() method calling GET /v1/browser/status",
+        "getBrowserCdpUrl() method returning ws://host:port/v1/browser/cdp",
+        "Typecheck passes"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "Add TypeScript SDK browser navigation and tab methods",
+      "description": "As a developer, I need SDK methods for navigating and managing tabs.",
+      "acceptanceCriteria": [
+        "browserNavigate(request) method calling POST /v1/browser/navigate",
+        "browserBack() method calling POST /v1/browser/back",
+        "browserForward() method calling POST /v1/browser/forward",
+        "browserReload(request?) method calling POST /v1/browser/reload",
+        "browserWait(request) method calling POST /v1/browser/wait",
+        "getBrowserTabs() method calling GET /v1/browser/tabs",
+        "createBrowserTab(request?) method calling POST /v1/browser/tabs",
+        "activateBrowserTab(tabId) method calling POST /v1/browser/tabs/:id/activate",
+        "closeBrowserTab(tabId) method calling DELETE /v1/browser/tabs/:id",
+        "Typecheck passes"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "Add TypeScript SDK browser content extraction methods",
+      "description": "As a developer, I need SDK methods for extracting page content.",
+      "acceptanceCriteria": [
+        "takeBrowserScreenshot(request?) returning Promise<Uint8Array> calling GET /v1/browser/screenshot",
+        "getBrowserPdf(request?) returning Promise<Uint8Array> calling GET /v1/browser/pdf",
+        "getBrowserContent(request?) calling GET /v1/browser/content",
+        "getBrowserMarkdown() calling GET /v1/browser/markdown",
+        "scrapeBrowser(request) calling POST /v1/browser/scrape",
+        "getBrowserLinks() calling GET /v1/browser/links",
+        "executeBrowserScript(request) calling POST /v1/browser/execute",
+        "getBrowserSnapshot() calling GET /v1/browser/snapshot",
+        "Typecheck passes"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "Add TypeScript SDK browser interaction methods",
+      "description": "As a developer, I need SDK methods for interacting with page elements.",
+      "acceptanceCriteria": [
+        "browserClick(request) calling POST /v1/browser/click",
+        "browserType(request) calling POST /v1/browser/type",
+        "browserSelect(request) calling POST /v1/browser/select",
+        "browserHover(request) calling POST /v1/browser/hover",
+        "browserScroll(request) calling POST /v1/browser/scroll",
+        "browserUpload(request) calling POST /v1/browser/upload",
+        "browserDialog(request) calling POST /v1/browser/dialog",
+        "Typecheck passes"
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "Add TypeScript SDK browser monitoring, crawl, context, and cookie methods",
+      "description": "As a developer, I need SDK methods for monitoring, crawling, contexts, and cookies.",
+      "acceptanceCriteria": [
+        "getBrowserConsole(request?) calling GET /v1/browser/console",
+        "getBrowserNetwork(request?) calling GET /v1/browser/network",
+        "crawlBrowser(request) calling POST /v1/browser/crawl",
+        "getBrowserContexts() calling GET /v1/browser/contexts",
+        "createBrowserContext(request) calling POST /v1/browser/contexts",
+        "deleteBrowserContext(contextId) calling DELETE /v1/browser/contexts/:id",
+        "getBrowserCookies(request?) calling GET /v1/browser/cookies",
+        "setBrowserCookies(request) calling POST /v1/browser/cookies",
+        "deleteBrowserCookies(request?) calling DELETE /v1/browser/cookies",
+        "Typecheck passes"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "Add BrowserViewer React component",
+      "description": "As a developer, I need a reusable React component for embedding the browser stream with navigation.",
+      "acceptanceCriteria": [
+        "New file sdks/react/src/BrowserViewer.tsx",
+        "BrowserViewerProps interface with client, className, style, height, showNavigationBar (default true), showStatusBar (default true), onNavigate, onConnect, onDisconnect, onError",
+        "BrowserViewerClient type using Pick from SandboxAgent: connectDesktopStream, browserNavigate, browserBack, browserForward, browserReload, getBrowserStatus",
+        "Wraps DesktopViewer with navigation bar (back, forward, reload buttons + URL input)",
+        "Exported from sdks/react/src/index.ts",
+        "Typecheck passes"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "Add Browser tab to Inspector UI - runtime control and live view sections",
+      "description": "As a user, I need a Browser tab in the inspector for controlling and viewing the browser.",
+      "acceptanceCriteria": [
+        "New file frontend/packages/inspector/src/components/debug/BrowserTab.tsx",
+        "Tab registered in DebugPanel.tsx with Globe icon from lucide-react, added after desktop tab",
+        "DebugTab type updated to include 'browser'",
+        "Section 1 - Runtime Control: state pill, status grid (URL, Resolution, Started), config inputs (Width, Height, URL, Context dropdown), Start/Stop buttons, auto-refresh every 5s when active",
+        "Section 2 - Live View: navigation bar (Back, Forward, Reload + URL input), DesktopViewer component for WebRTC stream, current URL display",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": "Follow DesktopTab.tsx patterns for card layout and state management"
+    },
+    {
+      "id": "US-027",
+      "title": "Add Browser tab - screenshot, tabs, and console sections",
+      "description": "As a user, I need screenshot capture, tab management, and console viewing in the inspector Browser tab.",
+      "acceptanceCriteria": [
+        "Section 3 - Screenshot: format selector (PNG/JPEG/WebP), quality input, fullPage checkbox, selector input, screenshot button + preview image",
+        "Section 4 - Tabs: list of open tabs with URL and title, active tab highlighted, per-tab Activate/Close buttons, New Tab button with URL input",
+        "Section 5 - Console: level filter pills (All/Log/Warn/Error/Info), scrollable message list with level-colored indicators, auto-refresh every 3s, Clear button",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 27,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-028",
+      "title": "Add Browser tab - network, content tools, recording, contexts, diagnostics sections",
+      "description": "As a user, I need network monitoring, content extraction, recording, context management, and diagnostics in the inspector.",
+      "acceptanceCriteria": [
+        "Section 6 - Network: request list (method, URL, status, size, duration), URL pattern filter, auto-refresh every 3s",
+        "Section 7 - Content Tools: Get HTML, Get Markdown, Get Links, Get Snapshot buttons with output textarea",
+        "Section 8 - Recording: reuse desktop recording UI pattern (start/stop, FPS input, recording list with download/delete)",
+        "Section 9 - Contexts: list contexts with name/date/size, create form, delete button, Use button to set contextId",
+        "Section 10 - Diagnostics: last error details, process list (Xvfb, Chromium, Neko) with PIDs and running state",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 28,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-029",
+      "title": "Add browser API integration tests",
+      "description": "As a developer, I need integration tests for the browser HTTP API.",
+      "acceptanceCriteria": [
+        "New file server/packages/sandbox-agent/tests/browser_api.rs",
+        "Test lifecycle: start, status shows active, stop, status shows inactive",
+        "Test navigation: navigate to test page, back, forward, reload",
+        "Test tabs: create tab, list shows 2 tabs, activate second, close first",
+        "Test screenshots: capture PNG, JPEG, WebP; verify non-empty binary response",
+        "Test content extraction: HTML contains expected elements, markdown is non-empty, links extracted",
+        "Test interaction: click button, type in input, verify page state changed",
+        "Test contexts: create context, list shows it, delete context",
+        "Tests use static test HTML pages served from within the sandbox (no network deps)",
+        "Update docker/test-agent/Dockerfile to include Chromium if not already present",
+        "Tests pass"
+      ],
+      "priority": 29,
+      "passes": false,
+      "notes": "Run with: cargo test -p sandbox-agent --test browser_api"
+    }
+  ]
+}

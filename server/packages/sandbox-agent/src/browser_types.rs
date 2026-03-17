@@ -426,6 +426,9 @@ pub struct BrowserNetworkQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserNetworkRequest {
+    /// Internal CDP request ID for correlating request/response events.
+    #[serde(default, skip_serializing)]
+    pub request_id: Option<String>,
     pub url: String,
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

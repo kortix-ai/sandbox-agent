@@ -305,6 +305,8 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/browser/scroll", post(post_v1_browser_scroll))
         .route("/browser/upload", post(post_v1_browser_upload))
         .route("/browser/dialog", post(post_v1_browser_dialog))
+        .route("/browser/console", get(get_v1_browser_console))
+        .route("/browser/network", get(get_v1_browser_network))
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -520,6 +522,8 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         post_v1_browser_scroll,
         post_v1_browser_upload,
         post_v1_browser_dialog,
+        get_v1_browser_console,
+        get_v1_browser_network,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -625,6 +629,12 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserScrollRequest,
             BrowserUploadRequest,
             BrowserDialogRequest,
+            BrowserConsoleQuery,
+            BrowserConsoleMessage,
+            BrowserConsoleResponse,
+            BrowserNetworkQuery,
+            BrowserNetworkRequest,
+            BrowserNetworkResponse,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -2618,6 +2628,60 @@ async fn post_v1_browser_dialog(
         .await?;
 
     Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Get browser console messages.
+///
+/// Returns console messages captured from the browser, optionally filtered by
+/// level (log, debug, info, warning, error) and limited in count.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/console",
+    tag = "v1",
+    params(BrowserConsoleQuery),
+    responses(
+        (status = 200, description = "Console messages retrieved", body = BrowserConsoleResponse),
+        (status = 409, description = "Browser not active", body = ProblemDetails),
+        (status = 500, description = "Internal error", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_console(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BrowserConsoleQuery>,
+) -> Result<Json<BrowserConsoleResponse>, ApiError> {
+    state.browser_runtime().ensure_active().await?;
+    let messages = state
+        .browser_runtime()
+        .console_messages(query.level.as_deref(), query.limit)
+        .await;
+    Ok(Json(BrowserConsoleResponse { messages }))
+}
+
+/// Get browser network requests.
+///
+/// Returns network requests captured from the browser, optionally filtered by
+/// URL pattern and limited in count.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/network",
+    tag = "v1",
+    params(BrowserNetworkQuery),
+    responses(
+        (status = 200, description = "Network requests retrieved", body = BrowserNetworkResponse),
+        (status = 409, description = "Browser not active", body = ProblemDetails),
+        (status = 500, description = "Internal error", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_network(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BrowserNetworkQuery>,
+) -> Result<Json<BrowserNetworkResponse>, ApiError> {
+    state.browser_runtime().ensure_active().await?;
+    let requests = state
+        .browser_runtime()
+        .network_requests(query.url_pattern.as_deref(), query.limit)
+        .await;
+    Ok(Json(BrowserNetworkResponse { requests }))
 }
 
 /// Helper: get the current page URL and title via CDP Runtime.evaluate.
