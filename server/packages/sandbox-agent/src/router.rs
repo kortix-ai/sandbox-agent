@@ -37,7 +37,9 @@ use tracing::Span;
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 
 use crate::acp_proxy_runtime::{AcpProxyRuntime, ProxyPostOutcome};
+use crate::browser_errors::BrowserProblem;
 use crate::browser_runtime::BrowserRuntime;
+use crate::browser_types::*;
 use crate::desktop_errors::DesktopProblem;
 use crate::desktop_runtime::DesktopRuntime;
 use crate::desktop_types::*;
@@ -270,6 +272,9 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/desktop/stream/stop", post(post_v1_desktop_stream_stop))
         .route("/desktop/stream/status", get(get_v1_desktop_stream_status))
         .route("/desktop/stream/signaling", get(get_v1_desktop_stream_ws))
+        .route("/browser/status", get(get_v1_browser_status))
+        .route("/browser/start", post(post_v1_browser_start))
+        .route("/browser/stop", post(post_v1_browser_stop))
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -457,6 +462,9 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         post_v1_desktop_stream_start,
         post_v1_desktop_stream_stop,
         get_v1_desktop_stream_ws,
+        get_v1_browser_status,
+        post_v1_browser_start,
+        post_v1_browser_stop,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -526,6 +534,9 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             DesktopRecordingInfo,
             DesktopRecordingListResponse,
             DesktopStreamStatusResponse,
+            BrowserState,
+            BrowserStartRequest,
+            BrowserStatusResponse,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -617,6 +628,12 @@ impl From<ProblemDetails> for ApiError {
 
 impl From<DesktopProblem> for ApiError {
     fn from(value: DesktopProblem) -> Self {
+        Self::Problem(value.to_problem_details())
+    }
+}
+
+impl From<BrowserProblem> for ApiError {
+    fn from(value: BrowserProblem) -> Self {
         Self::Problem(value.to_problem_details())
     }
 }
@@ -720,6 +737,70 @@ async fn post_v1_desktop_stop(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DesktopStatusResponse>, ApiError> {
     let status = state.desktop_runtime().stop().await?;
+    Ok(Json(status))
+}
+
+/// Get browser runtime status.
+///
+/// Returns the current browser state, display information, CDP URL,
+/// and managed process details.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/status",
+    tag = "v1",
+    responses(
+        (status = 200, description = "Browser runtime status", body = BrowserStatusResponse),
+        (status = 401, description = "Authentication required", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BrowserStatusResponse>, ApiError> {
+    Ok(Json(state.browser_runtime().status().await))
+}
+
+/// Start the browser runtime.
+///
+/// Launches Chromium with remote debugging, optionally starts Xvfb for
+/// non-headless mode, and returns the resulting browser status snapshot.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/start",
+    tag = "v1",
+    request_body = BrowserStartRequest,
+    responses(
+        (status = 200, description = "Browser runtime status after start", body = BrowserStatusResponse),
+        (status = 400, description = "Invalid browser start request", body = ProblemDetails),
+        (status = 409, description = "Browser or desktop runtime conflict", body = ProblemDetails),
+        (status = 424, description = "Browser dependencies not installed", body = ProblemDetails),
+        (status = 500, description = "Browser runtime could not be started", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_start(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BrowserStartRequest>,
+) -> Result<Json<BrowserStatusResponse>, ApiError> {
+    let status = state.browser_runtime().start(body).await?;
+    Ok(Json(status))
+}
+
+/// Stop the browser runtime.
+///
+/// Terminates Chromium, the CDP client, and any associated Xvfb/Neko
+/// processes, then returns the resulting status snapshot.
+#[utoipa::path(
+    post,
+    path = "/v1/browser/stop",
+    tag = "v1",
+    responses(
+        (status = 200, description = "Browser runtime status after stop", body = BrowserStatusResponse),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails)
+    )
+)]
+async fn post_v1_browser_stop(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BrowserStatusResponse>, ApiError> {
+    let status = state.browser_runtime().stop().await?;
     Ok(Json(status))
 }
 
