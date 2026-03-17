@@ -275,6 +275,7 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
         .route("/browser/status", get(get_v1_browser_status))
         .route("/browser/start", post(post_v1_browser_start))
         .route("/browser/stop", post(post_v1_browser_stop))
+        .route("/browser/cdp", get(get_v1_browser_cdp_ws))
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -465,6 +466,7 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         get_v1_browser_status,
         post_v1_browser_start,
         post_v1_browser_stop,
+        get_v1_browser_cdp_ws,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -802,6 +804,121 @@ async fn post_v1_browser_stop(
 ) -> Result<Json<BrowserStatusResponse>, ApiError> {
     let status = state.browser_runtime().stop().await?;
     Ok(Json(status))
+}
+
+/// Open a CDP WebSocket proxy session.
+///
+/// Upgrades the connection to a WebSocket that relays bidirectionally to
+/// Chromium's internal CDP WebSocket endpoint. External tools like Playwright
+/// or Puppeteer can connect via `ws://sandbox-host:2468/v1/browser/cdp`.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/cdp",
+    tag = "v1",
+    responses(
+        (status = 101, description = "WebSocket upgraded"),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP connection failed", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_cdp_ws(
+    State(state): State<Arc<AppState>>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    state.browser_runtime().ensure_active().await?;
+    Ok(ws
+        .on_upgrade(move |socket| browser_cdp_ws_session(socket, state.browser_runtime()))
+        .into_response())
+}
+
+/// CDP WebSocket proxy session.
+///
+/// Proxies the WebSocket bidirectionally between the external client and
+/// Chromium's internal CDP WebSocket endpoint. All CDP commands and events
+/// are relayed transparently.
+async fn browser_cdp_ws_session(mut client_ws: WebSocket, browser_runtime: Arc<BrowserRuntime>) {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+    // Discover the actual CDP WebSocket URL from Chromium.
+    let cdp_ws_url = match browser_runtime.cdp_ws_url().await {
+        Ok(url) => url,
+        Err(_) => {
+            let _ = send_ws_error(&mut client_ws, "browser CDP endpoint is not available").await;
+            let _ = client_ws.close().await;
+            return;
+        }
+    };
+
+    // Connect to Chromium's internal CDP WebSocket.
+    let (cdp_ws, _) = match tokio_tungstenite::connect_async(&cdp_ws_url).await {
+        Ok(conn) => conn,
+        Err(err) => {
+            let _ = send_ws_error(
+                &mut client_ws,
+                &format!("failed to connect to CDP endpoint: {err}"),
+            )
+            .await;
+            let _ = client_ws.close().await;
+            return;
+        }
+    };
+
+    let (mut cdp_sink, mut cdp_stream) = cdp_ws.split();
+
+    // Relay messages bidirectionally between client and CDP.
+    loop {
+        tokio::select! {
+            // Client → CDP
+            client_msg = client_ws.recv() => {
+                match client_msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if cdp_sink.send(TungsteniteMessage::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Binary(data))) => {
+                        if cdp_sink.send(TungsteniteMessage::Binary(data.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        let _ = client_ws.send(Message::Pong(payload)).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            // CDP → Client
+            cdp_msg = cdp_stream.next() => {
+                match cdp_msg {
+                    Some(Ok(TungsteniteMessage::Text(text))) => {
+                        if client_ws.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(TungsteniteMessage::Binary(data))) => {
+                        if client_ws.send(Message::Binary(data.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(TungsteniteMessage::Ping(payload))) => {
+                        if cdp_sink.send(TungsteniteMessage::Pong(payload.clone())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(TungsteniteMessage::Close(_))) | None => break,
+                    Some(Ok(TungsteniteMessage::Pong(_))) => {}
+                    Some(Ok(TungsteniteMessage::Frame(_))) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+        }
+    }
+
+    let _ = cdp_sink.close().await;
+    let _ = client_ws.close().await;
 }
 
 /// Capture a full desktop screenshot.

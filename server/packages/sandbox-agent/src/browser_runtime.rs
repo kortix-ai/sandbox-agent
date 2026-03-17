@@ -417,6 +417,43 @@ impl BrowserRuntime {
         f(cdp).await
     }
 
+    /// Ensure the browser runtime is active.
+    ///
+    /// Returns `BrowserProblem::NotActive` if the browser is not running.
+    pub async fn ensure_active(&self) -> Result<(), BrowserProblem> {
+        let state = self.inner.lock().await;
+        if state.state != BrowserState::Active {
+            return Err(BrowserProblem::not_active());
+        }
+        Ok(())
+    }
+
+    /// Discover the CDP WebSocket debugger URL from Chromium.
+    ///
+    /// Queries `http://127.0.0.1:9222/json/version` and extracts the
+    /// `webSocketDebuggerUrl` field.
+    pub async fn cdp_ws_url(&self) -> Result<String, BrowserProblem> {
+        self.ensure_active().await?;
+
+        let version_url = format!("http://127.0.0.1:{CDP_PORT}/json/version");
+        let resp = reqwest::get(&version_url).await.map_err(|e| {
+            BrowserProblem::cdp_error(format!(
+                "failed to reach CDP endpoint at {version_url}: {e}"
+            ))
+        })?;
+        let version_info: serde_json::Value = resp.json().await.map_err(|e| {
+            BrowserProblem::cdp_error(format!("invalid JSON from {version_url}: {e}"))
+        })?;
+        version_info["webSocketDebuggerUrl"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                BrowserProblem::cdp_error(
+                    "webSocketDebuggerUrl not found in /json/version response",
+                )
+            })
+    }
+
     /// Get the streaming manager for WebRTC signaling.
     pub fn streaming_manager(&self) -> &DesktopStreamingManager {
         &self.streaming_manager
