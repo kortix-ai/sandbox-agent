@@ -51,6 +51,8 @@ pub async fn crawl_pages(
 
     while let Some((url, depth)) = queue.pop_front() {
         if pages.len() >= max_pages {
+            // Push back so truncated detection sees remaining work.
+            queue.push_front((url, depth));
             break;
         }
 
@@ -147,7 +149,10 @@ pub async fn crawl_pages(
                     continue;
                 }
                 if let Ok(parsed) = Url::parse(link) {
-                    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                    if parsed.scheme() != "http"
+                        && parsed.scheme() != "https"
+                        && parsed.scheme() != "file"
+                    {
                         continue;
                     }
                     if let Some(host) = parsed.host_str() {
@@ -326,7 +331,7 @@ async fn extract_links(cdp: &CdpClient) -> Result<Vec<String>, BrowserProblem> {
         (function() {
             var links = [];
             document.querySelectorAll('a[href]').forEach(function(a) {
-                if (a.href && a.href.startsWith('http')) {
+                if (a.href && (a.href.startsWith('http') || a.href.startsWith('file:'))) {
                     links.push(a.href);
                 }
             });

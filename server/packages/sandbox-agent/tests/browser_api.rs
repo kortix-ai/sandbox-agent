@@ -972,3 +972,150 @@ async fn v1_browser_network_monitoring() {
         send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
     assert_eq!(status, StatusCode::OK);
 }
+
+const TEST_HTML_CRAWL_A: &str = r#"<!DOCTYPE html>
+<html>
+<head><title>Page A</title></head>
+<body>
+<h1>Page A</h1>
+<p>This is page A content.</p>
+<a href="page-b.html">Go to Page B</a>
+</body>
+</html>"#;
+
+const TEST_HTML_CRAWL_B: &str = r#"<!DOCTYPE html>
+<html>
+<head><title>Page B</title></head>
+<body>
+<h1>Page B</h1>
+<p>This is page B content.</p>
+<a href="page-c.html">Go to Page C</a>
+</body>
+</html>"#;
+
+const TEST_HTML_CRAWL_C: &str = r#"<!DOCTYPE html>
+<html>
+<head><title>Page C</title></head>
+<body>
+<h1>Page C</h1>
+<p>This is page C content. No more links.</p>
+</body>
+</html>"#;
+
+#[tokio::test]
+#[serial]
+async fn v1_browser_crawl() {
+    let test_app = TestApp::new(AuthConfig::disabled());
+
+    // Start browser
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/start",
+        Some(json!({ "headless": true })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "start: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // Write the 3 linked test HTML pages
+    write_test_file(&test_app.app, "/tmp/page-a.html", TEST_HTML_CRAWL_A).await;
+    write_test_file(&test_app.app, "/tmp/page-b.html", TEST_HTML_CRAWL_B).await;
+    write_test_file(&test_app.app, "/tmp/page-c.html", TEST_HTML_CRAWL_C).await;
+
+    // Crawl starting from page-a with maxDepth=2, extract=text
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/crawl",
+        Some(json!({
+            "url": "file:///tmp/page-a.html",
+            "maxDepth": 2,
+            "extract": "text"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "crawl: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let parsed = parse_json(&body);
+    let pages = parsed["pages"].as_array().expect("pages array");
+
+    // Should have 3 pages: page-a (depth 0), page-b (depth 1), page-c (depth 2)
+    assert_eq!(
+        pages.len(),
+        3,
+        "expected 3 crawled pages, got {}: {parsed}",
+        pages.len()
+    );
+
+    // Verify depths
+    assert_eq!(pages[0]["depth"], 0, "page-a should be depth 0");
+    assert_eq!(pages[1]["depth"], 1, "page-b should be depth 1");
+    assert_eq!(pages[2]["depth"], 2, "page-c should be depth 2");
+
+    // Verify page content (text extraction)
+    assert!(
+        pages[0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Page A"),
+        "page-a content should contain 'Page A'"
+    );
+    assert!(
+        pages[1]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Page B"),
+        "page-b content should contain 'Page B'"
+    );
+    assert!(
+        pages[2]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Page C"),
+        "page-c content should contain 'Page C'"
+    );
+
+    // Verify totalPages and truncated
+    assert_eq!(parsed["totalPages"], 3);
+    assert_eq!(parsed["truncated"], false);
+
+    // Test maxPages=1 returns only 1 page and truncated is true
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/crawl",
+        Some(json!({
+            "url": "file:///tmp/page-a.html",
+            "maxPages": 1,
+            "maxDepth": 2,
+            "extract": "text"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed = parse_json(&body);
+    let pages = parsed["pages"].as_array().expect("pages array");
+    assert_eq!(pages.len(), 1, "maxPages=1 should return only 1 page");
+    assert_eq!(parsed["totalPages"], 1);
+    assert_eq!(
+        parsed["truncated"], true,
+        "should be truncated when more pages exist"
+    );
+
+    // Stop browser
+    let (status, _, _) =
+        send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+}
