@@ -290,6 +290,8 @@ pub fn build_router_with_state(shared: Arc<AppState>) -> (Router, Arc<AppState>)
             post(post_v1_browser_tab_activate),
         )
         .route("/browser/tabs/:tab_id", delete(delete_v1_browser_tab))
+        .route("/browser/screenshot", get(get_v1_browser_screenshot))
+        .route("/browser/pdf", get(get_v1_browser_pdf))
         .route("/agents", get(get_v1_agents))
         .route("/agents/:agent", get(get_v1_agent))
         .route("/agents/:agent/install", post(post_v1_agent_install))
@@ -490,6 +492,8 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
         post_v1_browser_tabs,
         post_v1_browser_tab_activate,
         delete_v1_browser_tab,
+        get_v1_browser_screenshot,
+        get_v1_browser_pdf,
         get_v1_agents,
         get_v1_agent,
         post_v1_agent_install,
@@ -573,6 +577,10 @@ pub async fn shutdown_servers(state: &Arc<AppState>) {
             BrowserTabListResponse,
             BrowserCreateTabRequest,
             BrowserActionResponse,
+            BrowserScreenshotQuery,
+            BrowserScreenshotFormat,
+            BrowserPdfQuery,
+            BrowserPdfFormat,
             DesktopClipboardResponse,
             DesktopClipboardQuery,
             DesktopClipboardWriteRequest,
@@ -1501,6 +1509,158 @@ async fn delete_v1_browser_tab(
     }
 
     Ok(Json(BrowserActionResponse { ok: true }))
+}
+
+/// Capture a browser page screenshot.
+///
+/// Captures a screenshot of the current browser page via CDP
+/// `Page.captureScreenshot` and returns the image bytes with the appropriate
+/// Content-Type header.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/screenshot",
+    tag = "v1",
+    params(BrowserScreenshotQuery),
+    responses(
+        (status = 200, description = "Browser screenshot as image bytes"),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_screenshot(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BrowserScreenshotQuery>,
+) -> Result<Response, ApiError> {
+    use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
+    use base64::Engine;
+
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let fmt = query.format.unwrap_or(BrowserScreenshotFormat::Png);
+    let cdp_format = match fmt {
+        BrowserScreenshotFormat::Png => "png",
+        BrowserScreenshotFormat::Jpeg => "jpeg",
+        BrowserScreenshotFormat::Webp => "webp",
+    };
+
+    let mut params = serde_json::json!({ "format": cdp_format });
+    if let Some(quality) = query.quality {
+        params["quality"] = serde_json::json!(quality);
+    }
+    if query.full_page.unwrap_or(false) {
+        params["captureBeyondViewport"] = serde_json::json!(true);
+    }
+    if let Some(ref selector) = query.selector {
+        // Resolve element bounding box for clip region
+        let js = format!(
+            r#"(() => {{
+                const el = document.querySelector({selector});
+                if (!el) return null;
+                const r = el.getBoundingClientRect();
+                return {{ x: r.x, y: r.y, width: r.width, height: r.height }};
+            }})()"#,
+            selector = serde_json::to_string(selector).unwrap_or_default()
+        );
+        let eval_result = cdp
+            .send(
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": js,
+                    "returnByValue": true
+                })),
+            )
+            .await?;
+        if let Some(value) = eval_result.get("result").and_then(|r| r.get("value")) {
+            if !value.is_null() {
+                params["clip"] = serde_json::json!({
+                    "x": value.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    "y": value.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    "width": value.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    "height": value.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    "scale": 1
+                });
+            } else {
+                return Err(BrowserProblem::invalid_selector(&format!(
+                    "No element matches selector: {}",
+                    selector
+                ))
+                .into());
+            }
+        }
+    }
+
+    let result = cdp.send("Page.captureScreenshot", Some(params)).await?;
+
+    let data_b64 = result.get("data").and_then(|v| v.as_str()).unwrap_or("");
+    let bytes = BASE64_ENGINE
+        .decode(data_b64)
+        .map_err(|e| BrowserProblem::cdp_error(&format!("Failed to decode screenshot: {}", e)))?;
+
+    let content_type = match fmt {
+        BrowserScreenshotFormat::Png => "image/png",
+        BrowserScreenshotFormat::Jpeg => "image/jpeg",
+        BrowserScreenshotFormat::Webp => "image/webp",
+    };
+
+    Ok(([(header::CONTENT_TYPE, content_type)], Bytes::from(bytes)).into_response())
+}
+
+/// Generate a PDF of the current browser page.
+///
+/// Generates a PDF document from the current page via CDP `Page.printToPDF`
+/// and returns the PDF bytes.
+#[utoipa::path(
+    get,
+    path = "/v1/browser/pdf",
+    tag = "v1",
+    params(BrowserPdfQuery),
+    responses(
+        (status = 200, description = "Browser page as PDF bytes"),
+        (status = 409, description = "Browser runtime is not active", body = ProblemDetails),
+        (status = 502, description = "CDP command failed", body = ProblemDetails)
+    )
+)]
+async fn get_v1_browser_pdf(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BrowserPdfQuery>,
+) -> Result<Response, ApiError> {
+    use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
+    use base64::Engine;
+
+    let cdp = state.browser_runtime().get_cdp().await?;
+
+    let (paper_width, paper_height) = match query.format.unwrap_or(BrowserPdfFormat::Letter) {
+        BrowserPdfFormat::A4 => (8.27_f64, 11.69_f64),
+        BrowserPdfFormat::Letter => (8.5_f64, 11.0_f64),
+        BrowserPdfFormat::Legal => (8.5_f64, 14.0_f64),
+    };
+
+    let mut params = serde_json::json!({
+        "paperWidth": paper_width,
+        "paperHeight": paper_height,
+    });
+    if let Some(landscape) = query.landscape {
+        params["landscape"] = serde_json::json!(landscape);
+    }
+    if let Some(print_background) = query.print_background {
+        params["printBackground"] = serde_json::json!(print_background);
+    }
+    if let Some(scale) = query.scale {
+        params["scale"] = serde_json::json!(scale);
+    }
+
+    let result = cdp.send("Page.printToPDF", Some(params)).await?;
+
+    let data_b64 = result.get("data").and_then(|v| v.as_str()).unwrap_or("");
+    let bytes = BASE64_ENGINE
+        .decode(data_b64)
+        .map_err(|e| BrowserProblem::cdp_error(&format!("Failed to decode PDF: {}", e)))?;
+
+    Ok((
+        [(header::CONTENT_TYPE, "application/pdf")],
+        Bytes::from(bytes),
+    )
+        .into_response())
 }
 
 /// Helper: get the current page URL and title via CDP Runtime.evaluate.
