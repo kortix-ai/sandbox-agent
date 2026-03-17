@@ -679,3 +679,15 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
   - context_ids are always hex-encoded (32 hex chars from 16 random bytes), so `^[a-f0-9]+$` is the right validation
   - Defence-in-depth pattern: validate format first, then canonicalize+verify path containment even if format looks safe
 ---
+
+## 2026-03-17 - US-039
+- Fixed leaked background tasks on browser stop
+- Added `cdp_listener_tasks: Vec<tokio::task::JoinHandle<()>>` field to `BrowserRuntimeStateData`
+- Captured JoinHandles from the 3 `tokio::spawn` calls (console, network request, network response listeners)
+- Added `handle.abort()` loop in `stop()` before closing CDP client
+- Files changed: `browser_runtime.rs`
+- **Learnings for future iterations:**
+  - When spawning background tasks that hold Arc references to shared state, always store the JoinHandle so they can be aborted on cleanup
+  - `drain(..)` is idiomatic for consuming and clearing a Vec in one step
+  - Abort tasks BEFORE closing the resource they depend on (CDP client) to avoid race conditions
+---

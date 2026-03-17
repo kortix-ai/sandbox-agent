@@ -639,7 +639,7 @@
         "Typecheck passes"
       ],
       "priority": 39,
-      "passes": false,
+      "passes": true,
       "notes": "Currently 3 tokio::spawn tasks are created in start() (lines ~300-455) but never cancelled in stop(). Each start/stop cycle leaks 3 zombie tasks holding Arc references to the state."
     },
     {
