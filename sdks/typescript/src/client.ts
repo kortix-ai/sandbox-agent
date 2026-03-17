@@ -32,9 +32,19 @@ import {
   type AgentListResponse,
   type BrowserActionResponse,
   type BrowserClickRequest,
+  type BrowserConsoleQuery,
+  type BrowserConsoleResponse,
   type BrowserContentQuery,
   type BrowserContentResponse,
+  type BrowserContextCreateRequest,
+  type BrowserContextInfo,
+  type BrowserContextListResponse,
+  type BrowserCookiesQuery,
+  type BrowserCookiesResponse,
+  type BrowserCrawlRequest,
+  type BrowserCrawlResponse,
   type BrowserCreateTabRequest,
+  type BrowserDeleteCookiesQuery,
   type BrowserDialogRequest,
   type BrowserExecuteRequest,
   type BrowserExecuteResponse,
@@ -42,6 +52,8 @@ import {
   type BrowserLinksResponse,
   type BrowserMarkdownResponse,
   type BrowserNavigateRequest,
+  type BrowserNetworkQuery,
+  type BrowserNetworkResponse,
   type BrowserPageInfo,
   type BrowserPdfQuery,
   type BrowserReloadRequest,
@@ -50,6 +62,7 @@ import {
   type BrowserScrapeRequest,
   type BrowserScrapeResponse,
   type BrowserSelectRequest,
+  type BrowserSetCookiesRequest,
   type BrowserSnapshotResponse,
   type BrowserStartRequest,
   type BrowserStatusResponse,
@@ -2171,6 +2184,42 @@ export class SandboxAgent {
 
   async browserDialog(request: BrowserDialogRequest): Promise<BrowserActionResponse> {
     return this.requestJson("POST", `${API_PREFIX}/browser/dialog`, { body: request });
+  }
+
+  async getBrowserConsole(query?: BrowserConsoleQuery): Promise<BrowserConsoleResponse> {
+    return this.requestJson("GET", `${API_PREFIX}/browser/console`, { query });
+  }
+
+  async getBrowserNetwork(query?: BrowserNetworkQuery): Promise<BrowserNetworkResponse> {
+    return this.requestJson("GET", `${API_PREFIX}/browser/network`, { query });
+  }
+
+  async crawlBrowser(request: BrowserCrawlRequest): Promise<BrowserCrawlResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/crawl`, { body: request });
+  }
+
+  async getBrowserContexts(): Promise<BrowserContextListResponse> {
+    return this.requestJson("GET", `${API_PREFIX}/browser/contexts`);
+  }
+
+  async createBrowserContext(request: BrowserContextCreateRequest): Promise<BrowserContextInfo> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/contexts`, { body: request });
+  }
+
+  async deleteBrowserContext(contextId: string): Promise<BrowserActionResponse> {
+    return this.requestJson("DELETE", `${API_PREFIX}/browser/contexts/${contextId}`);
+  }
+
+  async getBrowserCookies(query?: BrowserCookiesQuery): Promise<BrowserCookiesResponse> {
+    return this.requestJson("GET", `${API_PREFIX}/browser/cookies`, { query });
+  }
+
+  async setBrowserCookies(request: BrowserSetCookiesRequest): Promise<BrowserActionResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/cookies`, { body: request });
+  }
+
+  async deleteBrowserCookies(query?: BrowserDeleteCookiesQuery): Promise<BrowserActionResponse> {
+    return this.requestJson("DELETE", `${API_PREFIX}/browser/cookies`, { query });
   }
 
   private async getLiveConnection(agent: string): Promise<LiveAcpConnection> {
