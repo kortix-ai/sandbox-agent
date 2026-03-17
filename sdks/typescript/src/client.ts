@@ -30,6 +30,8 @@ import {
   type AgentInstallRequest,
   type AgentInstallResponse,
   type AgentListResponse,
+  type BrowserStartRequest,
+  type BrowserStatusResponse,
   type DesktopActionResponse,
   type DesktopClipboardQuery,
   type DesktopClipboardResponse,
@@ -2006,6 +2008,28 @@ export class SandboxAgent {
 
   connectDesktopStream(options: DesktopStreamSessionOptions = {}): DesktopStreamSession {
     return new DesktopStreamSession(this.connectDesktopStreamWebSocket(options));
+  }
+
+  async startBrowser(request: BrowserStartRequest = {}): Promise<BrowserStatusResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/start`, {
+      body: request,
+    });
+  }
+
+  async stopBrowser(): Promise<BrowserStatusResponse> {
+    return this.requestJson("POST", `${API_PREFIX}/browser/stop`);
+  }
+
+  async getBrowserStatus(): Promise<BrowserStatusResponse> {
+    return this.requestJson("GET", `${API_PREFIX}/browser/status`);
+  }
+
+  getBrowserCdpUrl(options: ProcessTerminalWebSocketUrlOptions = {}): string {
+    return toWebSocketUrl(
+      this.buildUrl(`${API_PREFIX}/browser/cdp`, {
+        access_token: options.accessToken ?? this.token,
+      }),
+    );
   }
 
   private async getLiveConnection(agent: string): Promise<LiveAcpConnection> {
