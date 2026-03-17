@@ -1,7 +1,9 @@
 //! Sandbox agent core utilities.
 
 mod acp_proxy_runtime;
+mod browser_errors;
 mod browser_install;
+pub mod browser_types;
 pub mod cli;
 pub mod daemon;
 mod desktop_errors;
