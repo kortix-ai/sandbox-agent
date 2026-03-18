@@ -902,13 +902,37 @@ const TEST_HTML_NETWORK: &str = r#"<!DOCTYPE html>
 <head><title>Network Test</title></head>
 <body>
 <p>Network test page</p>
+<script>
+// Trigger a real HTTP fetch so CDP captures a network request with a response
+fetch('/hello.txt').catch(function() {});
+</script>
 </body>
 </html>"#;
+
+const TEST_NETWORK_HELLO: &str = "hello from network test";
 
 #[tokio::test]
 #[serial]
 async fn v1_browser_network_monitoring() {
     let test_app = TestApp::new(AuthConfig::disabled());
+    let http_port: u16 = 18770;
+
+    // Write test assets into the container
+    write_test_file(
+        &test_app.app,
+        "/tmp/network-test/index.html",
+        TEST_HTML_NETWORK,
+    )
+    .await;
+    write_test_file(
+        &test_app.app,
+        "/tmp/network-test/hello.txt",
+        TEST_NETWORK_HELLO,
+    )
+    .await;
+
+    // Start an HTTP server inside the container to serve the test pages
+    let server_pid = start_http_server(&test_app.app, "/tmp/network-test", http_port).await;
 
     // Start browser
     let (status, _, body) = send_request(
@@ -926,51 +950,70 @@ async fn v1_browser_network_monitoring() {
         String::from_utf8_lossy(&body)
     );
 
-    // Write and navigate to a test page to generate network activity
-    write_test_file(&test_app.app, "/tmp/test-network.html", TEST_HTML_NETWORK).await;
+    // Navigate to the test page served over HTTP (triggers a fetch to /hello.txt)
     let (status, _, _) = send_request(
         &test_app.app,
         Method::POST,
         "/v1/browser/navigate",
-        Some(json!({ "url": "file:///tmp/test-network.html" })),
+        Some(json!({ "url": format!("http://localhost:{http_port}/index.html") })),
         &[],
     )
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // Wait for CDP network events to be captured
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Poll for network requests until the expected entry appears (up to 5s)
+    let mut captured_requests: Vec<serde_json::Value> = Vec::new();
+    for _ in 0..25 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (status, _, body) =
+            send_request(&test_app.app, Method::GET, "/v1/browser/network", None, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let parsed = parse_json(&body);
+        let requests = parsed["requests"].as_array().expect("requests array");
+        // Look for the hello.txt request with a populated status
+        if requests.iter().any(|r| {
+            r["url"]
+                .as_str()
+                .map_or(false, |u| u.contains("/hello.txt"))
+                && r["status"].as_u64().is_some()
+        }) {
+            captured_requests = requests.clone();
+            break;
+        }
+    }
 
-    // Get network requests
-    let (status, _, body) =
-        send_request(&test_app.app, Method::GET, "/v1/browser/network", None, &[]).await;
-    assert_eq!(status, StatusCode::OK);
-    let parsed = parse_json(&body);
-    let requests = parsed["requests"].as_array().expect("requests array");
     assert!(
-        !requests.is_empty(),
-        "should have captured at least one network request from page navigation"
+        !captured_requests.is_empty(),
+        "should have captured network requests"
     );
 
-    // Verify request entries have expected fields
-    let first = &requests[0];
-    assert!(
-        first["url"].as_str().is_some() && !first["url"].as_str().unwrap().is_empty(),
-        "request should have a url"
+    // Find the hello.txt request and verify its values
+    let hello_req = captured_requests
+        .iter()
+        .find(|r| {
+            r["url"]
+                .as_str()
+                .map_or(false, |u| u.contains("/hello.txt"))
+        })
+        .expect("should have captured the /hello.txt request");
+
+    assert_eq!(
+        hello_req["method"].as_str(),
+        Some("GET"),
+        "request method should be GET"
     );
-    assert!(
-        first["method"].as_str().is_some(),
-        "request should have a method"
-    );
-    assert!(
-        first["timestamp"].as_str().is_some(),
-        "request should have a timestamp"
+    assert_eq!(
+        hello_req["status"].as_u64(),
+        Some(200),
+        "request status should be 200"
     );
 
     // Stop browser
     let (status, _, _) =
         send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
     assert_eq!(status, StatusCode::OK);
+
+    stop_http_server(&test_app.app, &server_pid).await;
 }
 
 const TEST_HTML_CRAWL_A: &str = r#"<!DOCTYPE html>
