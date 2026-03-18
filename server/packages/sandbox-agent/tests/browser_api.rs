@@ -1002,10 +1002,96 @@ const TEST_HTML_CRAWL_C: &str = r#"<!DOCTYPE html>
 </body>
 </html>"#;
 
+/// Start a Python HTTP server inside the container serving a directory on the
+/// given port. Returns the process ID so the caller can clean it up.
+async fn start_http_server(app: &docker_support::DockerApp, dir: &str, port: u16) -> String {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(app.http_url("/v1/processes"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(
+            json!({
+                "command": "python3",
+                "args": ["-m", "http.server", port.to_string(), "--directory", dir],
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("start http server process");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "failed to start http server"
+    );
+    let body: Value = response.json().await.expect("json response");
+    let process_id = body["id"].as_str().expect("process id").to_string();
+
+    // Wait for the server to bind inside the container by running a curl check.
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let check = client
+            .post(app.http_url("/v1/processes/run"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(
+                json!({
+                    "command": "curl",
+                    "args": ["-sf", "-o", "/dev/null", format!("http://localhost:{port}/")],
+                    "timeoutMs": 2000
+                })
+                .to_string(),
+            )
+            .send()
+            .await;
+        if let Ok(resp) = check {
+            if let Ok(val) = resp.json::<Value>().await {
+                if val["exitCode"] == 0 {
+                    break;
+                }
+            }
+        }
+    }
+
+    process_id
+}
+
+/// Stop a process started via the process API.
+async fn stop_http_server(app: &docker_support::DockerApp, process_id: &str) {
+    let client = reqwest::Client::new();
+    let _ = client
+        .post(app.http_url(&format!("/v1/processes/{process_id}/kill")))
+        .send()
+        .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn v1_browser_crawl() {
     let test_app = TestApp::new(AuthConfig::disabled());
+    let http_port: u16 = 18765;
+
+    // Write the 3 linked test HTML pages
+    write_test_file(
+        &test_app.app,
+        "/tmp/crawl-test/page-a.html",
+        TEST_HTML_CRAWL_A,
+    )
+    .await;
+    write_test_file(
+        &test_app.app,
+        "/tmp/crawl-test/page-b.html",
+        TEST_HTML_CRAWL_B,
+    )
+    .await;
+    write_test_file(
+        &test_app.app,
+        "/tmp/crawl-test/page-c.html",
+        TEST_HTML_CRAWL_C,
+    )
+    .await;
+
+    // Start a local HTTP server inside the container to serve the test pages.
+    let server_pid = start_http_server(&test_app.app, "/tmp/crawl-test", http_port).await;
 
     // Start browser
     let (status, _, body) = send_request(
@@ -1023,10 +1109,7 @@ async fn v1_browser_crawl() {
         String::from_utf8_lossy(&body)
     );
 
-    // Write the 3 linked test HTML pages
-    write_test_file(&test_app.app, "/tmp/page-a.html", TEST_HTML_CRAWL_A).await;
-    write_test_file(&test_app.app, "/tmp/page-b.html", TEST_HTML_CRAWL_B).await;
-    write_test_file(&test_app.app, "/tmp/page-c.html", TEST_HTML_CRAWL_C).await;
+    let base_url = format!("http://localhost:{http_port}");
 
     // Crawl starting from page-a with maxDepth=2, extract=text
     let (status, _, body) = send_request(
@@ -1034,7 +1117,7 @@ async fn v1_browser_crawl() {
         Method::POST,
         "/v1/browser/crawl",
         Some(json!({
-            "url": "file:///tmp/page-a.html",
+            "url": format!("{base_url}/page-a.html"),
             "maxDepth": 2,
             "extract": "text"
         })),
@@ -1096,7 +1179,7 @@ async fn v1_browser_crawl() {
         Method::POST,
         "/v1/browser/crawl",
         Some(json!({
-            "url": "file:///tmp/page-a.html",
+            "url": format!("{base_url}/page-a.html"),
             "maxPages": 1,
             "maxDepth": 2,
             "extract": "text"
@@ -1114,8 +1197,35 @@ async fn v1_browser_crawl() {
         "should be truncated when more pages exist"
     );
 
+    // Test that file:// URLs are rejected with 400
+    let (status, _, body) = send_request(
+        &test_app.app,
+        Method::POST,
+        "/v1/browser/crawl",
+        Some(json!({
+            "url": "file:///etc/passwd",
+            "extract": "text"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "file:// URL should be rejected: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let parsed = parse_json(&body);
+    assert_eq!(
+        parsed["code"], "browser/invalid-url",
+        "should return invalid-url error code"
+    );
+
     // Stop browser
     let (status, _, _) =
         send_request(&test_app.app, Method::POST, "/v1/browser/stop", None, &[]).await;
     assert_eq!(status, StatusCode::OK);
+
+    // Clean up the HTTP server
+    stop_http_server(&test_app.app, &server_pid).await;
 }

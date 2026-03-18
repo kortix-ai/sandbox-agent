@@ -28,7 +28,8 @@
 - Test helper `write_test_file()` uses `PUT /v1/fs/file?path=...` to write HTML test fixtures into the container
 - `docker/test-agent/Dockerfile` must include chromium + deps (libnss3, libatk-bridge2.0-0, libdrm2, libxcomposite1, libxdamage1, libxrandr2, libgbm1, libasound2, libpangocairo-1.0-0, libgtk-3-0) for browser integration tests
 - `get_page_info_via_cdp()` is a helper fn in router.rs for getting current URL and title via Runtime.evaluate
-- Crawl supports `file://`, `http://`, and `https://` schemes; `extract_links` JS filter and `crawl_pages` Rust scheme filter must both be updated when adding new schemes
+- Crawl only allows `http://` and `https://` schemes (file:// rejected with 400); `extract_links` JS filter and `crawl_pages` Rust scheme filter must both be updated when adding new schemes
+- Integration tests can start background services inside the container via `POST /v1/processes` and check readiness via `POST /v1/processes/run` (e.g. curl probe)
 - Crawl `truncated` detection: when breaking early on max_pages, push the popped URL back into the queue before breaking so `!queue.is_empty()` is accurate
 - CDP event-based features (console, network monitoring) are captured asynchronously by background tasks; integration tests need ~1s sleep after triggering events before asserting on endpoint results
 - CDP `Page.getNavigationHistory` returns `{currentIndex, entries: [{id, url, title}]}` for back/forward navigation
@@ -699,4 +700,19 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
 - **Learnings for future iterations:**
   - `get_cdp()` is the canonical pattern for accessing the CDP client - it returns an `Arc<CdpClient>` so callers don't hold the state lock during I/O
   - Dead public API methods should be removed proactively to avoid inviting misuse patterns
+---
+
+## 2026-03-17 - US-041
+- Restricted crawl endpoint to http/https schemes only (file:// URLs now return 400)
+- Added URL scheme validation at the top of crawl_pages() before any navigation
+- Removed 'file' from the link filtering scheme whitelist in the BFS crawl loop
+- Removed 'file:' prefix from extract_links() JavaScript href collection filter
+- Added BrowserProblem::invalid_url() constructor for 400 "Invalid URL" errors
+- Rewrote v1_browser_crawl integration test to use a local Python HTTP server (via process API) instead of file:// URLs
+- Added file:// URL rejection assertion in the crawl test
+- Files changed: `browser_crawl.rs`, `browser_errors.rs`, `browser_api.rs` (tests)
+- **Learnings for future iterations:**
+  - Integration tests can start background services in the container via POST /v1/processes (long-lived) and check readiness via POST /v1/processes/run (curl probe)
+  - PUT /v1/fs/file auto-creates parent directories, so no need for separate mkdir calls
+  - BrowserProblem extensions are flattened into the ProblemDetails JSON response (e.g. `parsed["code"]` not `parsed["extensions"]["code"]`)
 ---

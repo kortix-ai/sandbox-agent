@@ -670,7 +670,7 @@
         "Tests pass"
       ],
       "priority": 41,
-      "passes": false,
+      "passes": true,
       "notes": "SECURITY: file:// URLs combined with --no-sandbox Chromium lets anyone read arbitrary files via the crawl endpoint. The crawl link filter explicitly allows file:// scheme and extract_links collects file: hrefs."
     },
     {

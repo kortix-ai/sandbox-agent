@@ -82,6 +82,11 @@ impl BrowserProblem {
         Self::new(400, "Invalid Selector", "browser/invalid-selector", message)
     }
 
+    // 400 - invalid URL (e.g. disallowed scheme)
+    pub fn invalid_url(message: impl Into<String>) -> Self {
+        Self::new(400, "Invalid URL", "browser/invalid-url", message)
+    }
+
     pub fn to_problem_details(&self) -> ProblemDetails {
         let mut extensions = Map::new();
         extensions.insert("code".to_string(), Value::String(self.code.to_string()));

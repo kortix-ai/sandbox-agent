@@ -27,6 +27,16 @@ pub async fn crawl_pages(
     let start_url = Url::parse(&request.url)
         .map_err(|e| BrowserProblem::cdp_error(format!("Invalid start URL: {e}")))?;
 
+    // Only allow http and https schemes to prevent local filesystem reading.
+    match start_url.scheme() {
+        "http" | "https" => {}
+        scheme => {
+            return Err(BrowserProblem::invalid_url(format!(
+                "Unsupported URL scheme '{scheme}'. Only http and https are allowed."
+            )));
+        }
+    }
+
     let allowed_domains: HashSet<String> = if let Some(ref domains) = request.allowed_domains {
         domains.iter().cloned().collect()
     } else {
@@ -149,10 +159,7 @@ pub async fn crawl_pages(
                     continue;
                 }
                 if let Ok(parsed) = Url::parse(link) {
-                    if parsed.scheme() != "http"
-                        && parsed.scheme() != "https"
-                        && parsed.scheme() != "file"
-                    {
+                    if parsed.scheme() != "http" && parsed.scheme() != "https" {
                         continue;
                     }
                     if let Some(host) = parsed.host_str() {
@@ -331,7 +338,7 @@ async fn extract_links(cdp: &CdpClient) -> Result<Vec<String>, BrowserProblem> {
         (function() {
             var links = [];
             document.querySelectorAll('a[href]').forEach(function(a) {
-                if (a.href && (a.href.startsWith('http') || a.href.startsWith('file:'))) {
+                if (a.href && a.href.startsWith('http')) {
                     links.push(a.href);
                 }
             });
