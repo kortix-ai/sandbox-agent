@@ -654,10 +654,6 @@ export function createMockBackendClient(defaultOrganizationId = "default"): Back
       return buildSessionDetail(requireTask(taskId), sessionId);
     },
 
-    async getWorkspace(): Promise<TaskWorkspaceSnapshot> {
-      return workspace.getSnapshot();
-    },
-
     subscribeWorkspace(_organizationId: string, listener: () => void): () => void {
       return workspace.subscribe(listener);
     },

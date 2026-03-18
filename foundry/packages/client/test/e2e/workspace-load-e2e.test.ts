@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   createFoundryLogger,
-  type TaskWorkspaceSnapshot,
   type WorkspaceSession,
   type WorkspaceTask,
   type WorkspaceModelId,
@@ -60,12 +59,35 @@ async function poll<T>(label: string, timeoutMs: number, intervalMs: number, fn:
   }
 }
 
-function findTask(snapshot: TaskWorkspaceSnapshot, taskId: string): WorkspaceTask {
-  const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
-  if (!task) {
-    throw new Error(`task ${taskId} missing from snapshot`);
-  }
-  return task;
+async function fetchFullTask(client: ReturnType<typeof createBackendClient>, organizationId: string, repoId: string, taskId: string): Promise<WorkspaceTask> {
+  const detail = await client.getTaskDetail(organizationId, repoId, taskId);
+  const sessionDetails = await Promise.all(
+    detail.sessionsSummary.map(async (s) => {
+      const full = await client.getSessionDetail(organizationId, repoId, taskId, s.id);
+      return {
+        ...s,
+        draft: full.draft,
+        transcript: full.transcript,
+      } as WorkspaceSession;
+    }),
+  );
+  return {
+    id: detail.id,
+    repoId: detail.repoId,
+    title: detail.title,
+    status: detail.status,
+    repoName: detail.repoName,
+    updatedAtMs: detail.updatedAtMs,
+    branch: detail.branch,
+    pullRequest: detail.pullRequest,
+    activeSessionId: detail.activeSessionId ?? null,
+    sessions: sessionDetails,
+    fileChanges: detail.fileChanges,
+    diffs: detail.diffs,
+    fileTree: detail.fileTree,
+    minutesUsed: detail.minutesUsed,
+    activeSandboxId: detail.activeSandboxId ?? null,
+  };
 }
 
 function findTab(task: WorkspaceTask, sessionId: string): WorkspaceSession {
@@ -138,7 +160,7 @@ function average(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
 }
 
-async function measureWorkspaceSnapshot(
+async function measureOrganizationSummary(
   client: ReturnType<typeof createBackendClient>,
   organizationId: string,
   iterations: number,
@@ -147,35 +169,24 @@ async function measureWorkspaceSnapshot(
   maxMs: number;
   payloadBytes: number;
   taskCount: number;
-  tabCount: number;
-  transcriptEventCount: number;
 }> {
   const durations: number[] = [];
-  let snapshot: TaskWorkspaceSnapshot | null = null;
+  let snapshot: Awaited<ReturnType<typeof client.getOrganizationSummary>> | null = null;
 
   for (let index = 0; index < iterations; index += 1) {
     const startedAt = performance.now();
-    snapshot = await client.getWorkspace(organizationId);
+    snapshot = await client.getOrganizationSummary(organizationId);
     durations.push(performance.now() - startedAt);
   }
 
-  const finalSnapshot = snapshot ?? {
-    organizationId,
-    repos: [],
-    repositories: [],
-    tasks: [],
-  };
+  const finalSnapshot = snapshot ?? { organizationId, github: {} as any, repos: [], taskSummaries: [] };
   const payloadBytes = Buffer.byteLength(JSON.stringify(finalSnapshot), "utf8");
-  const tabCount = finalSnapshot.tasks.reduce((sum, task) => sum + task.sessions.length, 0);
-  const transcriptEventCount = finalSnapshot.tasks.reduce((sum, task) => sum + task.sessions.reduce((tabSum, tab) => tabSum + tab.transcript.length, 0), 0);
 
   return {
     avgMs: Math.round(average(durations)),
     maxMs: Math.round(Math.max(...durations, 0)),
     payloadBytes,
-    taskCount: finalSnapshot.tasks.length,
-    tabCount,
-    transcriptEventCount,
+    taskCount: finalSnapshot.taskSummaries.length,
   };
 }
 
@@ -204,11 +215,9 @@ describe("e2e(client): workspace load", () => {
       avgMs: number;
       maxMs: number;
       payloadBytes: number;
-      tabCount: number;
-      transcriptEventCount: number;
     }> = [];
 
-    snapshotSeries.push(await measureWorkspaceSnapshot(client, organizationId, 2));
+    snapshotSeries.push(await measureOrganizationSummary(client, organizationId, 2));
 
     for (let taskIndex = 0; taskIndex < taskCount; taskIndex += 1) {
       const runId = `load-${taskIndex}-${Date.now().toString(36)}`;
@@ -229,7 +238,7 @@ describe("e2e(client): workspace load", () => {
         `task ${runId} provisioning`,
         12 * 60_000,
         pollIntervalMs,
-        async () => findTask(await client.getWorkspace(organizationId), created.taskId),
+        async () => fetchFullTask(client, organizationId, repo.repoId, created.taskId),
         (task) => {
           const tab = task.sessions[0];
           return Boolean(tab && task.status === "idle" && tab.status === "idle" && transcriptIncludesAgentText(tab.transcript, initialReply));
@@ -264,7 +273,7 @@ describe("e2e(client): workspace load", () => {
           `task ${runId} session ${sessionIndex} reply`,
           10 * 60_000,
           pollIntervalMs,
-          async () => findTask(await client.getWorkspace(organizationId), created.taskId),
+          async () => fetchFullTask(client, organizationId, repo.repoId, created.taskId),
           (task) => {
             const tab = findTab(task, createdSession.sessionId);
             return tab.status === "idle" && transcriptIncludesAgentText(tab.transcript, expectedReply);
@@ -275,7 +284,7 @@ describe("e2e(client): workspace load", () => {
         expect(transcriptIncludesAgentText(findTab(withReply, createdSession.sessionId).transcript, expectedReply)).toBe(true);
       }
 
-      const snapshotMetrics = await measureWorkspaceSnapshot(client, organizationId, 3);
+      const snapshotMetrics = await measureOrganizationSummary(client, organizationId, 3);
       snapshotSeries.push(snapshotMetrics);
       logger.info(
         {
@@ -300,8 +309,7 @@ describe("e2e(client): workspace load", () => {
       snapshotReadFinalMaxMs: lastSnapshot.maxMs,
       snapshotPayloadBaselineBytes: firstSnapshot.payloadBytes,
       snapshotPayloadFinalBytes: lastSnapshot.payloadBytes,
-      snapshotTabFinalCount: lastSnapshot.tabCount,
-      snapshotTranscriptFinalCount: lastSnapshot.transcriptEventCount,
+      snapshotTaskFinalCount: lastSnapshot.taskCount,
     };
 
     logger.info(summary, "workspace_load_summary");

@@ -184,5 +184,14 @@ foundry-format:
 	prettier --write foundry
 
 [group('foundry')]
+foundry-dev-engine:
+	mkdir -p foundry/.foundry/logs
+	RIVET_RUN_ENGINE=1 FOUNDRY_BACKEND_PLATFORM=linux/amd64 HF_DOCKER_UID="$(id -u)" HF_DOCKER_GID="$(id -g)" docker compose --env-file .env -f foundry/compose.dev.yaml up --build --force-recreate -d
+
+[group('foundry')]
+foundry-mem-monitor interval='5':
+	./foundry/scripts/mem-monitor.sh {{interval}}
+
+[group('foundry')]
 foundry-docker-build tag='foundry:local':
 	docker build -f foundry/docker/backend.Dockerfile -t {{tag}} .

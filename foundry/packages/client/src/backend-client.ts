@@ -21,7 +21,6 @@ import type {
   TaskWorkspaceSelectInput,
   TaskWorkspaceSetSessionUnreadInput,
   TaskWorkspaceSendMessageInput,
-  TaskWorkspaceSnapshot,
   TaskWorkspaceSessionInput,
   TaskWorkspaceUpdateDraftInput,
   TaskEvent,
@@ -291,7 +290,6 @@ export interface BackendClient {
   getOrganizationSummary(organizationId: string): Promise<OrganizationSummarySnapshot>;
   getTaskDetail(organizationId: string, repoId: string, taskId: string): Promise<WorkspaceTaskDetail>;
   getSessionDetail(organizationId: string, repoId: string, taskId: string, sessionId: string): Promise<WorkspaceSessionDetail>;
-  getWorkspace(organizationId: string): Promise<TaskWorkspaceSnapshot>;
   subscribeWorkspace(organizationId: string, listener: () => void): () => void;
   createWorkspaceTask(organizationId: string, input: TaskWorkspaceCreateTaskInput): Promise<TaskWorkspaceCreateTaskResponse>;
   markWorkspaceUnread(organizationId: string, input: TaskWorkspaceSelectInput): Promise<void>;
@@ -593,91 +591,6 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
 
   const getSessionDetailWithAuth = async (organizationId: string, repoId: string, taskIdValue: string, sessionId: string): Promise<WorkspaceSessionDetail> => {
     return (await task(organizationId, repoId, taskIdValue)).getSessionDetail(await withAuthSessionInput({ sessionId }));
-  };
-
-  const getWorkspaceCompat = async (organizationId: string): Promise<TaskWorkspaceSnapshot> => {
-    const authSessionInput = await getAuthSessionInput();
-    const summary = await (await organization(organizationId)).getOrganizationSummary({ organizationId });
-    const resolvedTasks = await Promise.all(
-      summary.taskSummaries.map(async (taskSummary) => {
-        let detail;
-        try {
-          const taskHandle = await task(organizationId, taskSummary.repoId, taskSummary.id);
-          detail = await taskHandle.getTaskDetail(authSessionInput);
-        } catch (error) {
-          if (isActorNotFoundError(error)) {
-            return null;
-          }
-          throw error;
-        }
-        const sessionDetails = await Promise.all(
-          detail.sessionsSummary.map(async (session) => {
-            try {
-              const full = await (await task(organizationId, detail.repoId, detail.id)).getSessionDetail({
-                sessionId: session.id,
-                ...(authSessionInput ?? {}),
-              });
-              return [session.id, full] as const;
-            } catch (error) {
-              if (isActorNotFoundError(error)) {
-                return null;
-              }
-              throw error;
-            }
-          }),
-        );
-        const sessionDetailsById = new Map(sessionDetails.filter((entry): entry is readonly [string, WorkspaceSessionDetail] => entry !== null));
-        return {
-          id: detail.id,
-          repoId: detail.repoId,
-          title: detail.title,
-          status: detail.status,
-          repoName: detail.repoName,
-          updatedAtMs: detail.updatedAtMs,
-          branch: detail.branch,
-          pullRequest: detail.pullRequest,
-          activeSessionId: detail.activeSessionId ?? null,
-          sessions: detail.sessionsSummary.map((session) => {
-            const full = sessionDetailsById.get(session.id);
-            return {
-              id: session.id,
-              sessionId: session.sessionId,
-              sessionName: session.sessionName,
-              agent: session.agent,
-              model: session.model,
-              status: session.status,
-              thinkingSinceMs: session.thinkingSinceMs,
-              unread: session.unread,
-              created: session.created,
-              draft: full?.draft ?? { text: "", attachments: [], updatedAtMs: null },
-              transcript: full?.transcript ?? [],
-            };
-          }),
-          fileChanges: detail.fileChanges,
-          diffs: detail.diffs,
-          fileTree: detail.fileTree,
-          minutesUsed: detail.minutesUsed,
-          activeSandboxId: detail.activeSandboxId ?? null,
-        };
-      }),
-    );
-    const tasks = resolvedTasks.filter((task): task is Exclude<(typeof resolvedTasks)[number], null> => task !== null);
-
-    const repositories = summary.repos
-      .map((repo) => ({
-        id: repo.id,
-        label: repo.label,
-        updatedAtMs: tasks.filter((task) => task.repoId === repo.id).reduce((latest, task) => Math.max(latest, task.updatedAtMs), repo.latestActivityMs),
-        tasks: tasks.filter((task) => task.repoId === repo.id).sort((left, right) => right.updatedAtMs - left.updatedAtMs),
-      }))
-      .filter((repo) => repo.tasks.length > 0);
-
-    return {
-      organizationId,
-      repos: summary.repos.map((repo) => ({ id: repo.id, label: repo.label })),
-      repositories,
-      tasks: tasks.sort((left, right) => right.updatedAtMs - left.updatedAtMs),
-    };
   };
 
   const subscribeWorkspace = (organizationId: string, listener: () => void): (() => void) => {
@@ -1223,10 +1136,6 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
 
     async getSessionDetail(organizationId: string, repoId: string, taskIdValue: string, sessionId: string): Promise<WorkspaceSessionDetail> {
       return await getSessionDetailWithAuth(organizationId, repoId, taskIdValue, sessionId);
-    },
-
-    async getWorkspace(organizationId: string): Promise<TaskWorkspaceSnapshot> {
-      return await getWorkspaceCompat(organizationId);
     },
 
     subscribeWorkspace(organizationId: string, listener: () => void): () => void {

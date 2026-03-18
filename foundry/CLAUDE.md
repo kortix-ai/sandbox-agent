@@ -136,6 +136,7 @@ Do not use polling (`refetchInterval`), empty "go re-fetch" broadcast events, or
 - **Task actor** materializes its own detail state (session summaries, sandbox info, diffs, file tree). `getTaskDetail` reads from the task actor's own SQLite. The task actor broadcasts updates directly to clients connected to it.
 - **Session data** lives on the task actor but is a separate subscription topic. The task topic includes `sessions_summary` (list without content). The `session` topic provides full transcript and draft state. Clients subscribe to the `session` topic for whichever session is active, and filter `sessionUpdated` events by session ID (ignoring events for other sessions on the same actor).
 - There is no fan-out on the read path. The organization actor owns all task summaries locally.
+- **Never build client-side fan-out** that iterates task summaries and calls `getTaskDetail`/`getSessionDetail` on each. This wakes every actor simultaneously and causes OOM crashes in production (~25 MB per actor wake). The subscription system connects to at most 4 actors at a time (app + org + task + session).
 
 ### Subscription manager
 

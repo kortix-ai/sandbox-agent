@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { TaskWorkspaceSnapshot, WorkspaceSession, WorkspaceTask, WorkspaceModelId, WorkspaceTranscriptEvent } from "@sandbox-agent/foundry-shared";
+import type { WorkspaceSession, WorkspaceTask, WorkspaceModelId, WorkspaceTranscriptEvent } from "@sandbox-agent/foundry-shared";
 import { createBackendClient } from "../../src/backend-client.js";
 import { requireImportedRepo } from "./helpers.js";
 
@@ -38,12 +38,35 @@ async function poll<T>(label: string, timeoutMs: number, intervalMs: number, fn:
   }
 }
 
-function findTask(snapshot: TaskWorkspaceSnapshot, taskId: string): WorkspaceTask {
-  const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
-  if (!task) {
-    throw new Error(`task ${taskId} missing from snapshot`);
-  }
-  return task;
+async function fetchFullTask(client: ReturnType<typeof createBackendClient>, organizationId: string, repoId: string, taskId: string): Promise<WorkspaceTask> {
+  const detail = await client.getTaskDetail(organizationId, repoId, taskId);
+  const sessionDetails = await Promise.all(
+    detail.sessionsSummary.map(async (s) => {
+      const full = await client.getSessionDetail(organizationId, repoId, taskId, s.id);
+      return {
+        ...s,
+        draft: full.draft,
+        transcript: full.transcript,
+      } as WorkspaceSession;
+    }),
+  );
+  return {
+    id: detail.id,
+    repoId: detail.repoId,
+    title: detail.title,
+    status: detail.status,
+    repoName: detail.repoName,
+    updatedAtMs: detail.updatedAtMs,
+    branch: detail.branch,
+    pullRequest: detail.pullRequest,
+    activeSessionId: detail.activeSessionId ?? null,
+    sessions: sessionDetails,
+    fileChanges: detail.fileChanges,
+    diffs: detail.diffs,
+    fileTree: detail.fileTree,
+    minutesUsed: detail.minutesUsed,
+    activeSandboxId: detail.activeSandboxId ?? null,
+  };
 }
 
 function findTab(task: WorkspaceTask, sessionId: string): WorkspaceSession {
@@ -155,7 +178,7 @@ describe("e2e(client): workspace flows", () => {
         "task provisioning",
         12 * 60_000,
         2_000,
-        async () => findTask(await client.getWorkspace(organizationId), created.taskId),
+        async () => fetchFullTask(client, organizationId, repo.repoId, created.taskId),
         (task) => task.branch === `e2e/${runId}` && task.sessions.length > 0,
       );
 
@@ -165,7 +188,7 @@ describe("e2e(client): workspace flows", () => {
         "initial agent response",
         12 * 60_000,
         2_000,
-        async () => findTask(await client.getWorkspace(organizationId), created.taskId),
+        async () => fetchFullTask(client, organizationId, repo.repoId, created.taskId),
         (task) => {
           const tab = findTab(task, primaryTab.id);
           return task.status === "idle" && tab.status === "idle" && transcriptIncludesAgentText(tab.transcript, expectedInitialReply);
@@ -219,7 +242,7 @@ describe("e2e(client): workspace flows", () => {
         ],
       });
 
-      const drafted = findTask(await client.getWorkspace(organizationId), created.taskId);
+      const drafted = await fetchFullTask(client, organizationId, repo.repoId, created.taskId);
       expect(findTab(drafted, secondTab.sessionId).draft.text).toContain(expectedReply);
       expect(findTab(drafted, secondTab.sessionId).draft.attachments).toHaveLength(1);
 
@@ -246,7 +269,7 @@ describe("e2e(client): workspace flows", () => {
         "follow-up session response",
         10 * 60_000,
         2_000,
-        async () => findTask(await client.getWorkspace(organizationId), created.taskId),
+        async () => fetchFullTask(client, organizationId, repo.repoId, created.taskId),
         (task) => {
           const tab = findTab(task, secondTab.sessionId);
           return (
@@ -267,7 +290,7 @@ describe("e2e(client): workspace flows", () => {
       });
       await client.markWorkspaceUnread(organizationId, { repoId: repo.repoId, taskId: created.taskId });
 
-      const unreadSnapshot = findTask(await client.getWorkspace(organizationId), created.taskId);
+      const unreadSnapshot = await fetchFullTask(client, organizationId, repo.repoId, created.taskId);
       expect(unreadSnapshot.sessions.some((tab) => tab.unread)).toBe(true);
 
       await client.closeWorkspaceSession(organizationId, {
@@ -280,7 +303,7 @@ describe("e2e(client): workspace flows", () => {
         "secondary session closed",
         30_000,
         1_000,
-        async () => findTask(await client.getWorkspace(organizationId), created.taskId),
+        async () => fetchFullTask(client, organizationId, repo.repoId, created.taskId),
         (task) => !task.sessions.some((tab) => tab.id === secondTab.sessionId),
       );
       expect(closedSnapshot.sessions).toHaveLength(1);
@@ -295,7 +318,7 @@ describe("e2e(client): workspace flows", () => {
         "file revert reflected in workspace",
         30_000,
         1_000,
-        async () => findTask(await client.getWorkspace(organizationId), created.taskId),
+        async () => fetchFullTask(client, organizationId, repo.repoId, created.taskId),
         (task) => !task.fileChanges.some((file) => file.path === expectedFile),
       );
 

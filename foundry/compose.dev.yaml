@@ -2,6 +2,9 @@ name: foundry
 
 services:
   backend:
+    # Use linux/amd64 when RIVET_RUN_ENGINE=1 since the engine binary only
+    # ships for x86_64 Linux. Falls back to native platform otherwise.
+    platform: ${FOUNDRY_BACKEND_PLATFORM:-}
     build:
       context: ..
       dockerfile: foundry/docker/backend.dev.Dockerfile
@@ -11,6 +14,7 @@ services:
       - path: .env
         required: false
     environment:
+      NODE_ENV: "development"
       HF_BACKEND_HOST: "0.0.0.0"
       HF_BACKEND_PORT: "7741"
       RIVETKIT_STORAGE_PATH: "/root/.local/share/foundry/rivetkit"
@@ -18,6 +22,10 @@ services:
       RIVET_LOG_LEVEL: "${RIVET_LOG_LEVEL:-debug}"
       RIVET_LOG_TIMESTAMP: "${RIVET_LOG_TIMESTAMP:-1}"
       FOUNDRY_LOG_LEVEL: "${FOUNDRY_LOG_LEVEL:-debug}"
+      # Set RIVET_RUN_ENGINE=1 in .env or environment to use the Rust engine
+      # instead of the file-system driver. Eliminates native bun:sqlite KV
+      # overhead but WASM SQLite per-actor cost remains.
+      RIVET_RUN_ENGINE: "${RIVET_RUN_ENGINE:-}"
       # Pass through credentials needed for agent execution + PR creation in dev/e2e.
       # Do not hardcode secrets; set these in your environment when starting compose.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"

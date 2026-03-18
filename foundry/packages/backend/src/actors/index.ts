@@ -10,9 +10,14 @@ import { resolveRunnerVersion } from "../config/runner-version.js";
 
 const runnerVersion = resolveRunnerVersion();
 
+const backendPort = process.env.HF_BACKEND_PORT ?? "7741";
+
 export const registry = setup({
   serverless: {
     basePath: "/v1/rivet",
+    configureRunnerPool: {
+      url: `http://127.0.0.1:${backendPort}/v1/rivet`,
+    },
   },
   runner: { version: runnerVersion },
   logging: {

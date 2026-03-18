@@ -16,7 +16,7 @@
   "dependencies": {
     "@sandbox-agent/foundry-shared": "workspace:*",
     "react": "^19.1.1",
-    "rivetkit": "2.1.6",
+    "rivetkit": "https://pkg.pr.new/rivet-dev/rivet/rivetkit@791500a",
     "sandbox-agent": "workspace:*"
   },
   "devDependencies": {

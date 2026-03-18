@@ -8,4 +8,4 @@ export * from "./subscription/use-subscription.js";
 export * from "./keys.js";
 export * from "./mock-app.js";
 export * from "./view-model.js";
-export * from "./workspace-client.js";
+export type { TaskWorkspaceClient } from "./workspace-client.js";

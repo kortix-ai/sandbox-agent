@@ -14,17 +14,6 @@ import type {
   TaskWorkspaceSessionInput,
   TaskWorkspaceUpdateDraftInput,
 } from "@sandbox-agent/foundry-shared";
-import type { BackendClient } from "./backend-client.js";
-import { getSharedMockWorkspaceClient } from "./mock/workspace-client.js";
-import { createRemoteWorkspaceClient } from "./remote/workspace-client.js";
-
-export type TaskWorkspaceClientMode = "mock" | "remote";
-
-export interface CreateTaskWorkspaceClientOptions {
-  mode: TaskWorkspaceClientMode;
-  backend?: BackendClient;
-  organizationId?: string;
-}
 
 export interface TaskWorkspaceClient {
   getSnapshot(): TaskWorkspaceSnapshot;
@@ -45,22 +34,4 @@ export interface TaskWorkspaceClient {
   addSession(input: TaskWorkspaceSelectInput): Promise<TaskWorkspaceAddSessionResponse>;
   changeModel(input: TaskWorkspaceChangeModelInput): Promise<void>;
   changeOwner(input: TaskWorkspaceChangeOwnerInput): Promise<void>;
-}
-
-export function createTaskWorkspaceClient(options: CreateTaskWorkspaceClientOptions): TaskWorkspaceClient {
-  if (options.mode === "mock") {
-    return getSharedMockWorkspaceClient();
-  }
-
-  if (!options.backend) {
-    throw new Error("Remote task workspace client requires a backend client");
-  }
-  if (!options.organizationId) {
-    throw new Error("Remote task workspace client requires a organization id");
-  }
-
-  return createRemoteWorkspaceClient({
-    backend: options.backend,
-    organizationId: options.organizationId,
-  });
 }
