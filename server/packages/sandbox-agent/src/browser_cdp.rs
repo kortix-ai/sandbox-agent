@@ -158,6 +158,14 @@ impl CdpClient {
         rx
     }
 
+    /// Check whether the CDP WebSocket connection is still alive.
+    ///
+    /// Returns `true` if the background reader task is still running, which
+    /// means the WebSocket connection has not been closed or errored.
+    pub fn is_alive(&self) -> bool {
+        !self.reader_task.is_finished()
+    }
+
     /// Close the CDP connection and stop the reader task.
     pub async fn close(&self) {
         self.reader_task.abort();

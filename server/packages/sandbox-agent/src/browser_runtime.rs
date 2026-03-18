@@ -757,6 +757,17 @@ impl BrowserRuntime {
                 }
             }
         }
+
+        // Check CDP WebSocket connection is alive
+        if let Some(ref cdp) = state.cdp_client {
+            if !cdp.is_alive() {
+                let problem =
+                    BrowserProblem::cdp_error("CDP WebSocket connection died unexpectedly");
+                self.record_problem_locked(state, &problem);
+                state.state = BrowserState::Failed;
+                return;
+            }
+        }
     }
 
     fn snapshot_locked(&self, state: &BrowserRuntimeStateData) -> BrowserStatusResponse {
@@ -910,7 +921,7 @@ impl BrowserRuntime {
                 tty: false,
                 interactive: false,
                 owner: ProcessOwner::Desktop,
-                restart_policy: Some(RestartPolicy::Always),
+                restart_policy: Some(RestartPolicy::Never),
             })
             .await
             .map_err(|err| {

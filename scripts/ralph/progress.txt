@@ -716,3 +716,13 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
   - PUT /v1/fs/file auto-creates parent directories, so no need for separate mkdir calls
   - BrowserProblem extensions are flattened into the ProblemDetails JSON response (e.g. `parsed["code"]` not `parsed["extensions"]["code"]`)
 ---
+
+## 2026-03-17 - US-042
+- Added `is_alive()` method to CdpClient that checks if the reader_task JoinHandle is finished
+- Updated `refresh_status_locked()` in BrowserRuntime to check CDP client liveness after the Chromium process check; transitions to Failed state if the CDP WebSocket connection has died
+- Changed Chromium's RestartPolicy from Always to Never so a crash transitions cleanly to Failed state instead of auto-restarting with a stale CDP connection
+- Files changed: `browser_cdp.rs`, `browser_runtime.rs`
+- **Learnings for future iterations:**
+  - `JoinHandle::is_finished()` is a non-blocking way to check if a spawned task has exited - useful for health checks without await
+  - RestartPolicy is declared but not actually enforced by ProcessRuntime (the field has `#[allow(dead_code)]`), so changing it is primarily a signal for future implementation and prevents accidental auto-restart if it gets wired up
+---

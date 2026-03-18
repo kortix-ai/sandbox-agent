@@ -684,7 +684,7 @@
         "Typecheck passes"
       ],
       "priority": 42,
-      "passes": false,
+      "passes": true,
       "notes": "If Chromium crashes, RestartPolicy::Always restarts it but the CdpClient holds a dead WebSocket. State stays Active but all CDP operations fail. No recovery without manual stop+start."
     },
     {
