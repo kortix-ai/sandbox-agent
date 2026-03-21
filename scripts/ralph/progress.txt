@@ -726,3 +726,16 @@ Started: Tue Mar 17 04:32:06 AM PDT 2026
   - `JoinHandle::is_finished()` is a non-blocking way to check if a spawned task has exited - useful for health checks without await
   - RestartPolicy is declared but not actually enforced by ProcessRuntime (the field has `#[allow(dead_code)]`), so changing it is primarily a signal for future implementation and prevents accidental auto-restart if it gets wired up
 ---
+
+## 2026-03-17 - US-043
+- Rewrote `v1_browser_network_monitoring` integration test to use a real HTTP server instead of `file://` URLs
+- Test HTML page now triggers a `fetch('/hello.txt')` to generate a real network request with a response
+- Uses `start_http_server` helper (python3 http.server) inside the container to serve test assets
+- Replaced fixed 1-second sleep with a retry loop (poll every 200ms for up to 5s) waiting for the `/hello.txt` request with a populated status
+- Asserts: URL contains `/hello.txt`, method is `GET`, status is `200`
+- Files changed: `server/packages/sandbox-agent/tests/browser_api.rs`
+- **Learnings for future iterations:**
+  - `start_http_server` / `stop_http_server` helpers already exist in browser_api.rs for spinning up python3 HTTP servers inside the container; reuse them for any test that needs real HTTP traffic
+  - CDP `Network.responseReceived` events only fire for real HTTP requests, not `file://` URLs; always use an HTTP server for network monitoring tests
+  - Retry-loop pattern (poll every 200ms for up to 5s) is more robust than fixed sleeps for CDP event-based features
+---
