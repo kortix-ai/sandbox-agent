@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM oven/bun:1.3
+FROM node:22-bookworm-slim
 
 ARG SANDBOX_AGENT_VERSION=0.3.0
 
@@ -10,8 +10,6 @@ RUN apt-get update \
     curl \
     git \
     gh \
-    nodejs \
-    npm \
     openssh-client \
   && rm -rf /var/lib/apt/lists/*
 
@@ -27,8 +25,4 @@ RUN mkdir -p /etc/foundry \
 
 WORKDIR /app
 
-# NOTE: Do NOT use `bun --hot` here. Bun's hot reloading re-initializes the
-# server on a new port (e.g. 6421 instead of 6420) while the container still
-# exposes the original port, breaking all client connections. Restart the
-# backend container instead: `just foundry-dev-down && just foundry-dev`
-CMD ["bash", "-lc", "git config --global --add safe.directory /app >/dev/null 2>&1 || true; pnpm install --frozen-lockfile --filter @sandbox-agent/foundry-backend... && exec bun foundry/packages/backend/src/index.ts start --host 0.0.0.0 --port 7741"]
+CMD ["bash", "-lc", "git config --global --add safe.directory /app >/dev/null 2>&1 || true; pnpm install --frozen-lockfile --filter @sandbox-agent/foundry-backend... && pnpm --filter @sandbox-agent/foundry-shared build && pnpm --filter @sandbox-agent/foundry-backend build && exec node foundry/packages/backend/dist/index.js start --host 0.0.0.0 --port 7741"]

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { serve } from "@hono/node-server";
 import { randomUUID } from "node:crypto";
 import { initActorRuntimeContext } from "./actors/context.js";
 import { registry } from "./actors/index.js";
@@ -145,16 +146,13 @@ export async function startBackend(options: BackendStartOptions = {}): Promise<v
   // On-demand memory snapshot endpoint for diagnosing spikes (dev only).
   // Usage: curl http://127.0.0.1:7741/debug/memory
   // Trigger GC first: curl http://127.0.0.1:7741/debug/memory?gc=1
-  // Write JSC heap snapshot: curl http://127.0.0.1:7741/debug/memory?heap=1
-  //   (writes /tmp/foundry-heap-<timestamp>.json, inspect with chrome://tracing)
   app.get("/debug/memory", async (c) => {
     if (process.env.NODE_ENV !== "development") {
       return c.json({ error: "debug endpoints disabled in production" }, 403);
     }
     const wantGc = c.req.query("gc") === "1";
-    if (wantGc && typeof Bun !== "undefined") {
-      // Bun.gc(true) triggers a synchronous full GC sweep in JavaScriptCore.
-      Bun.gc(true);
+    if (wantGc && globalThis.gc) {
+      globalThis.gc();
     }
     const mem = process.memoryUsage();
     const rssMb = Math.round(mem.rss / 1024 / 1024);
@@ -162,12 +160,6 @@ export async function startBackend(options: BackendStartOptions = {}): Promise<v
     const heapTotalMb = Math.round(mem.heapTotal / 1024 / 1024);
     const externalMb = Math.round(mem.external / 1024 / 1024);
     const nonHeapMb = rssMb - heapUsedMb - externalMb;
-    // Bun.heapStats() gives JSC-specific breakdown: object counts, typed array
-    // bytes, extra memory (native allocations tracked by JSC). Useful for
-    // distinguishing JS object bloat from native/WASM memory.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const BunAny = Bun as any;
-    const heapStats = typeof BunAny.heapStats === "function" ? BunAny.heapStats() : null;
     const snapshot = {
       rssMb,
       heapUsedMb,
@@ -179,19 +171,9 @@ export async function startBackend(options: BackendStartOptions = {}): Promise<v
       heapUsedBytes: mem.heapUsed,
       heapTotalBytes: mem.heapTotal,
       externalBytes: mem.external,
-      ...(heapStats ? { bunHeapStats: heapStats } : {}),
     };
-    // Optionally write a full JSC heap snapshot for offline analysis.
-    let heapSnapshotPath: string | null = null;
-    const wantHeap = c.req.query("heap") === "1";
-    if (wantHeap && typeof Bun !== "undefined") {
-      heapSnapshotPath = `/tmp/foundry-heap-${Date.now()}.json`;
-      // Bun.generateHeapSnapshot("v8") returns a V8-compatible JSON string.
-      const heapJson = Bun.generateHeapSnapshot("v8");
-      await Bun.write(heapSnapshotPath, heapJson);
-    }
     logger.info(snapshot, "memory_usage_debug");
-    return c.json({ ...snapshot, ...(heapSnapshotPath ? { heapSnapshotPath } : {}) });
+    return c.json(snapshot);
   });
 
   app.use("*", async (c, next) => {
@@ -398,20 +380,16 @@ export async function startBackend(options: BackendStartOptions = {}): Promise<v
     return c.json({ ok: true });
   });
 
-  const server = Bun.serve({
-    fetch: (request) => {
-      if (isRivetRequest(request)) {
-        return registry.handler(request);
-      }
-      return app.fetch(request);
-    },
+  // Combine RivetKit registry handler with Hono app
+  const combinedApp = new Hono();
+  combinedApp.all("/v1/rivet/*", (c) => registry.handler(c.req.raw));
+  combinedApp.all("/v1/rivet", (c) => registry.handler(c.req.raw));
+  combinedApp.route("/", app);
+
+  const server = serve({
+    fetch: combinedApp.fetch,
     hostname: config.backend.host,
     port: config.backend.port,
-    // Bun defaults to 10s idle timeout. Actor RPCs go through the gateway
-    // tunnel (not direct HTTP), and the SSE stream has a 1s ping interval
-    // (RUNNER_SSE_PING_INTERVAL in rivetkit), so the idle timeout likely
-    // never fires in practice. Set high as a safety net regardless.
-    idleTimeout: 255,
   });
 
   logger.info(
@@ -424,7 +402,7 @@ export async function startBackend(options: BackendStartOptions = {}): Promise<v
 
   // Periodic memory usage reporting for diagnosing memory spikes (dev only).
   // Logs JS heap, RSS, and external (native/WASM) separately so we can tell
-  // whether spikes come from JS objects, Bun/JSC internals, or native addons
+  // whether spikes come from JS objects, V8 internals, or native addons
   // like SQLite/WASM.
   if (process.env.NODE_ENV === "development") {
     let prevRss = 0;
@@ -436,7 +414,7 @@ export async function startBackend(options: BackendStartOptions = {}): Promise<v
       const externalMb = Math.round(mem.external / 1024 / 1024);
       // Non-heap RSS: memory not accounted for by JS heap or external buffers.
       // Large values here point to native allocations (WASM, mmap, child process
-      // bookkeeping, Bun's internal arena, etc.).
+      // bookkeeping, etc.).
       const nonHeapMb = rssMb - heapUsedMb - externalMb;
       const deltaRss = rssMb - prevRss;
       prevRss = rssMb;
@@ -459,12 +437,12 @@ export async function startBackend(options: BackendStartOptions = {}): Promise<v
   }
 
   process.on("SIGINT", async () => {
-    server.stop();
+    server.close();
     process.exit(0);
   });
 
   process.on("SIGTERM", async () => {
-    server.stop();
+    server.close();
     process.exit(0);
   });
 

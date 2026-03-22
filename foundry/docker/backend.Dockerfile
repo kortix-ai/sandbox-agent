@@ -16,7 +16,7 @@ RUN SKIP_OPENAPI_GEN=1 pnpm --filter sandbox-agent build
 RUN pnpm --filter @sandbox-agent/foundry-backend build
 RUN pnpm --filter @sandbox-agent/foundry-backend deploy --prod /out
 
-FROM oven/bun:1.2 AS runtime
+FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production
 ENV HOME=/home/task
 ENV RIVET_RUNNER_VERSION_FILE=/etc/foundry/rivet-runner-version
@@ -37,4 +37,4 @@ RUN mkdir -p /etc/foundry \
 COPY --from=build /out ./
 USER task
 EXPOSE 7741
-CMD ["bun", "dist/index.js", "start", "--host", "0.0.0.0"]
+CMD ["node", "dist/index.js", "start", "--host", "0.0.0.0"]
