@@ -1,7 +1,8 @@
 // @ts-nocheck
 import { actor, queue } from "rivetkit";
 import { workflow, Loop } from "rivetkit/workflow";
-import { e2b, sandboxActor } from "rivetkit/sandbox";
+import { sandboxActor } from "rivetkit/sandbox";
+import { e2b } from "rivetkit/sandbox/e2b";
 import { existsSync } from "node:fs";
 import Dockerode from "dockerode";
 import { DEFAULT_WORKSPACE_MODEL_GROUPS, workspaceModelGroupsFromSandboxAgents, type WorkspaceModelGroup } from "@sandbox-agent/foundry-shared";

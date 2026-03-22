@@ -24,7 +24,7 @@
     "drizzle-orm": "^0.44.5",
     "hono": "^4.11.9",
     "pino": "^10.3.1",
-    "rivetkit": "https://pkg.pr.new/rivet-dev/rivet/rivetkit@a6d0f1f",
+    "rivetkit": "https://pkg.pr.new/rivet-dev/rivet/rivetkit@fc5f3b4",
     "sandbox-agent": "workspace:*",
     "uuid": "^13.0.0",
     "ws": "^8.19.0",
