@@ -1979,9 +1979,13 @@ async fn oc_session_prompt(
     let mut parts_input = body.parts.unwrap_or_default();
     let mut replay_events: Option<Vec<ReplayHeaderEvent>> = None;
     if let Some(first_part) = parts_input.first_mut() {
-        if let Some(text) = first_part.get("text").and_then(Value::as_str) {
+        if let Some(text) = first_part
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
             if !has_messages {
-                if let Some((parsed, remainder)) = parse_replay_header(text) {
+                if let Some((parsed, remainder)) = parse_replay_header(&text) {
                     replay_events = Some(parsed);
                     *first_part = json!({
                         "type": "text",
@@ -1992,7 +1996,7 @@ async fn oc_session_prompt(
             if replay_events.is_none() && text.starts_with(MSG_PREFIX) {
                 *first_part = json!({
                     "type": "text",
-                    "text": text.strip_prefix(MSG_PREFIX).unwrap_or(text),
+                    "text": text.strip_prefix(MSG_PREFIX).unwrap_or(&text),
                 });
             }
         }
