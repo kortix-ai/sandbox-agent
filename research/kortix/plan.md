@@ -43,6 +43,14 @@ Execute upstream's `research/acp/` plan (spec.md, migration-steps.md, 00-delete-
 
 > Verified at fork point (ab3ff01b, 2026-06-13): upstream's `server/CLAUDE.md` describes this phase's END state as if done — it is NOT. HEAD has no `/v1/rpc`, no `acp_runtime/`; `universal_events.rs`, legacy `/v1` session REST, and `opencode_compat.rs` are all still present. The implemented ACP starting point is `/v1/acp` + `/v1/acp/stream/:server_id` via `acp_proxy_runtime.rs` (per-AgentId shared processes). Both CLAUDE.md files carry fork-status notes to prevent agents trusting the aspirational text.
 
+**Upstream archaeology (2026-06-13) — where their ACP work actually lives:**
+- The ACP-native rewrite was started ON MAIN and aborted: PR #155 "acp spec" (merged 2026-02-11) added `acp_runtime/{backend,ext_meta,ext_methods,helpers,mock,mod}.rs` + the rewritten CLAUDE.md/docs; hours later `94353f76` "chore: fix bad merge" deleted the code but left the docs text — the source of the aspirational CLAUDE.md. Even at peak (#155) there was no `/v1/rpc` transport and universal_events was untouched (scaffolding only). View the deleted scaffolding: `git show e72eb9f6`.
+- **`03-30-feat_server_client_acp_add_specific_header_for_restoring_history` = v0.5.0-rc.3 — upstream's TRUE final state** (4 days past main, +217/−53): SSE history-restore header in the TS client + opencode-adapter work + tags v0.5.0-rc.1..rc.3. Directly relevant to envelope replay/`Last-Event-ID`. See D8.
+- `acp-permissions-sdk` (2026-03-10, 35 files +1785): TS SDK + acp-http-client permission flow (incl. fix preventing silent once→always escalation) + mock-agent tests → mine in P5.
+- `geneva-v1` (2026-03-15): ACP SDK 0.16.1 pin + e2e guidance → grab pin.
+- Feature PRs worth mining later: #223 builtin-agent-skills (auto-inject skills/CLAUDE.md at startup → P6 materializer), #301 opencode builtin commands via GET /opencode/command (→ P6 commands), #202 model/mode/thought-level config validation (→ config options), #225 hooks example.
+- `recovery/*` branches = workspace dumps (foundry/UI), ignore.
+
 **2a. Teardown** (per `00-delete-first.md`)
 - [ ] Delete universal-agent-schema + extracted-agent-schemas crates, conversion docs, v1 session/event model. KEEP: fs, processes/PTY, desktop runtimes, agent-management (→ runtime-management).
 - [ ] `/opencode/*` disabled during core bring-up (re-enabled Phase 5 only if needed — see D4).
@@ -184,6 +192,7 @@ P0 ──► P1 (spike, decides D1) ──► P2 (fork core) ──► P3 (host 
 | D5 | Public docs/site for the fork | P7 | internal-only until stable |
 | D6 | Launch runtime tier | end of P2 | opencode + claude GA; codex beta; amp/cursor/gemini later |
 | D7 | Desktop runtime | P0 | KEEP (Computers experimental section) |
+| D8 | Rebase fork base onto upstream v0.5.0-rc.3 (the 03-30 branch — upstream's true final state) vs stay on main@0.4.2 | before P2 starts | merge the rc.3 branch in (small diff, includes SSE history-restore work we want) |
 
 ## Deletion list (what dies in suna at cutover)
 
