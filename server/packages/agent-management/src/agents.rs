@@ -1776,7 +1776,12 @@ exit 0
         fs::create_dir_all(temp_dir.path().join("agent_processes"))
             .expect("create agent processes dir");
 
-        for agent in [AgentId::Claude, AgentId::Codex, AgentId::Opencode] {
+        for agent in [
+            AgentId::Claude,
+            AgentId::Codex,
+            AgentId::Opencode,
+            AgentId::Mock,
+        ] {
             fs::write(manager.binary_path(agent), b"stub").expect("write native binary");
             fs::write(manager.agent_process_path(agent), b"stub")
                 .expect("write agent process launcher");
