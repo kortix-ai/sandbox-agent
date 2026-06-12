@@ -1,8 +1,16 @@
 # Instructions
 
+> **KORTIX FORK (2026-06-13):** This is `kortix-ai/sandbox-agent`, a hard fork of
+> rivet-dev/sandbox-agent (upstream unmaintained since 2026-03-30). Design spec and
+> execution plan live in `research/kortix/` — read those first; they supersede the
+> conventions below where they conflict (e.g. extension namespace becomes `_kortix/*`,
+> "agent" is being renamed to "runtime" for the coding-agent binaries, telemetry is
+> opt-in only, releases/publishing are disabled). `server/CLAUDE.md` describes a
+> target state that is NOT yet implemented — see its status note.
+
 ## Naming and Ownership
 
-- This repository/product is **Sandbox Agent**.
+- This repository/product is **Sandbox Agent** (Kortix fork; product naming pending, see research/kortix/plan.md D2).
 - **Gigacode** is a separate user-facing UI/client, not the server product name.
 - Gigacode integrates with Sandbox Agent via the OpenCode-compatible surface (`/opencode/*`) when that compatibility layer is enabled.
 - Canonical extension namespace/domain string is `sandboxagent.dev` (no hyphen).

@@ -1,0 +1,11 @@
+Kortix Sandbox Agent
+Copyright 2026 Kortix
+
+This product is a fork of Sandbox Agent (https://github.com/rivet-dev/sandbox-agent),
+Copyright Rivet Gaming, LLC, licensed under the Apache License, Version 2.0.
+
+Forked at upstream commit ab3ff01b (2026-03-26). Modifications by Kortix include,
+but are not limited to: telemetry made opt-in, Kortix branding, removal of the
+foundry application, ACP-native runtime control plane changes, per-session
+environment scoping, and Kortix platform integration. See research/kortix/ for
+the design spec and execution plan.

@@ -63,14 +63,13 @@ struct ProviderInfo {
 }
 
 pub fn telemetry_enabled(no_telemetry: bool) -> bool {
+    // Kortix fork: telemetry is opt-in only; never report by default.
     let enabled = if no_telemetry {
         false
-    } else if cfg!(debug_assertions) {
+    } else {
         env::var(TELEMETRY_ENV_DEBUG)
             .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
             .unwrap_or(false)
-    } else {
-        true
     };
     TELEMETRY_ENABLED.store(enabled, Ordering::Relaxed);
     enabled

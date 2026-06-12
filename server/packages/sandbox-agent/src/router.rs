@@ -60,6 +60,7 @@ pub enum BrandingMode {
     #[default]
     SandboxAgent,
     Gigacode,
+    Kortix,
 }
 
 impl BrandingMode {
@@ -67,6 +68,7 @@ impl BrandingMode {
         match self {
             BrandingMode::SandboxAgent => "Sandbox Agent",
             BrandingMode::Gigacode => "Gigacode",
+            BrandingMode::Kortix => "Kortix Sandbox Agent",
         }
     }
 
@@ -74,6 +76,7 @@ impl BrandingMode {
         match self {
             BrandingMode::SandboxAgent => "https://sandboxagent.dev",
             BrandingMode::Gigacode => "https://gigacode.dev",
+            BrandingMode::Kortix => "https://kortix.com",
         }
     }
 }

@@ -41,6 +41,8 @@ Exit gate: prompt→streamed-response round trip from a script against dev API; 
 
 Execute upstream's `research/acp/` plan (spec.md, migration-steps.md, 00-delete-first.md) with Kortix deltas. This is mostly Rust.
 
+> Verified at fork point (ab3ff01b, 2026-06-13): upstream's `server/CLAUDE.md` describes this phase's END state as if done — it is NOT. HEAD has no `/v1/rpc`, no `acp_runtime/`; `universal_events.rs`, legacy `/v1` session REST, and `opencode_compat.rs` are all still present. The implemented ACP starting point is `/v1/acp` + `/v1/acp/stream/:server_id` via `acp_proxy_runtime.rs` (per-AgentId shared processes). Both CLAUDE.md files carry fork-status notes to prevent agents trusting the aspirational text.
+
 **2a. Teardown** (per `00-delete-first.md`)
 - [ ] Delete universal-agent-schema + extracted-agent-schemas crates, conversion docs, v1 session/event model. KEEP: fs, processes/PTY, desktop runtimes, agent-management (→ runtime-management).
 - [ ] `/opencode/*` disabled during core bring-up (re-enabled Phase 5 only if needed — see D4).

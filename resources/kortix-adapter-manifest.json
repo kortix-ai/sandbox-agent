@@ -1,0 +1,26 @@
+{
+  "$comment": "Kortix runtime adapter pins. P0 scaffold; consumed by runtime-management in P2 (research/kortix/plan.md). Adapters are baked into sandbox snapshots at build time; lazy registry installs are disabled in production (require_preinstall).",
+  "runtimes": {
+    "opencode": {
+      "adapter": "native-acp",
+      "command": ["opencode", "acp"],
+      "version": "pinned-at-snapshot-bake",
+      "source": "baked"
+    },
+    "claude": {
+      "adapter": "claude-code-acp",
+      "package": "@zed-industries/claude-code-acp",
+      "version": "0.44.0",
+      "source": "registry",
+      "native_dependency": "claude"
+    },
+    "codex": {
+      "adapter": "codex-acp",
+      "repo": "zed-industries/codex-acp",
+      "version": "0.16.0",
+      "source": "registry",
+      "native_dependency": "codex",
+      "tier": "beta"
+    }
+  }
+}

@@ -1,6 +1,16 @@
 # Server Instructions
 
-## ACP v1 Baseline
+> **KORTIX FORK STATUS (2026-06-13):** The "ACP v1 Baseline" below describes upstream's
+> TARGET state, written ahead of implementation — it does NOT match the code at the fork
+> point (ab3ff01b). Verified at HEAD: there is no `/v1/rpc`, no `acp_runtime/`,
+> `universal_events.rs` and the legacy `/v1` session REST still exist, and ACP dispatch
+> lives at `/v1/acp` + `/v1/acp/stream/:server_id` via `acp_proxy_runtime.rs`.
+> The migration to this baseline is Kortix Phase 2 — see `research/kortix/plan.md`
+> and `research/kortix/spec.md` (which supersede `research/acp/` where they conflict;
+> note the Kortix deltas: `_kortix/*` extension namespace, per-session adapter
+> processes, per-session env store).
+
+## ACP v1 Baseline (upstream target — NOT yet implemented, see status note above)
 
 - v1 is ACP-native.
 - `/v1/*` is removed and returns `410 Gone` (`application/problem+json`).
